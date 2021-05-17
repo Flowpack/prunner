@@ -1,0 +1,6 @@
+pipelines:
+  test_merge:
+    tasks:
+      lint:
+        scripts:
+          - echo "Bar"

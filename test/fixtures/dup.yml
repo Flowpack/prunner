@@ -1,0 +1,6 @@
+pipelines:
+  test_it:
+    tasks:
+      test:
+        script:
+          - echo "Duplicate"

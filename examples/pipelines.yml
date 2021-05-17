@@ -1,0 +1,64 @@
+pipelines:
+  create_release:
+    tasks:
+      lint:
+        script:
+          - staticcheck $(go list ./... | grep -v /vendor/)
+          - go vet $(go list ./... | grep -v /vendor/)
+      test:
+        script:
+          - go test ./...
+      do_something_long:
+        script:
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Dong
+      build:
+        script:
+          - go build -o bin/prunner .
+        depends_on: [lint, test, do_something_long]
+
+  test_it:
+    tasks:
+      lint:
+        script:
+          - echo "Foo"
+
+  fail_it:
+    tasks:
+      lint:
+        script:
+          - echo "Foo"
+      no-work:
+        script:
+          - go for a walk
