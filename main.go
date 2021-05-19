@@ -194,6 +194,7 @@ func (r *pipelineRunner) ListJobs() []pipelineJobResult {
 		jobRes.ID = pJob.ID
 		jobRes.Pipeline = pJob.Pipeline
 		jobRes.Completed = pJob.Completed
+		jobRes.Errored = pJob.graph.LastError() != nil
 		jobRes.Start = pJob.Start
 		jobRes.End = pJob.End
 		res = append(res, jobRes)
@@ -271,18 +272,33 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	}{JobID: pJob.ID.String()})
 }
 
+type pipelinesJobsResponse struct {
+	Pipelines []pipelineResult    `json:"pipelines"`
+	Jobs      []pipelineJobResult `json:"jobs"`
+}
+
 func (h *handler) pipelinesJobs(w http.ResponseWriter, r *http.Request) {
-	res := h.pRunner.ListJobs()
+	pipelinesRes := h.pRunner.ListPipelines()
+	jobsRes := h.pRunner.ListJobs()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(res)
+	_ = json.NewEncoder(w).Encode(pipelinesJobsResponse{
+		Pipelines: pipelinesRes,
+		Jobs:      jobsRes,
+	})
+}
+
+type pipelinesResponse struct {
+	Pipelines []pipelineResult `json:"pipelines"`
 }
 
 func (h *handler) pipelines(w http.ResponseWriter, r *http.Request) {
 	res := h.pRunner.ListPipelines()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(res)
+	_ = json.NewEncoder(w).Encode(pipelinesResponse{
+		Pipelines: res,
+	})
 }
 
 type taskResult struct {
@@ -305,6 +321,7 @@ type pipelineJobResult struct {
 	Pipeline  string       `json:"pipeline"`
 	Tasks     []taskResult `json:"tasks"`
 	Completed bool         `json:"completed"`
+	Errored   bool         `json:"errored"`
 	Start     time.Time    `json:"start"`
 	End       time.Time    `json:"end"`
 }
@@ -345,12 +362,59 @@ func graphToPipelineJobResult(g *scheduler.ExecutionGraph) pipelineJobResult {
 		taskResults = append(taskResults, res)
 	}
 
-	// TODO Order by rank in graph first, then by name
-	sort.Slice(taskResults, func(i, j int) bool {
-		return taskResults[i].Name < taskResults[j].Name
-	})
+	sortTaskResultsTopological(taskResults)
 
 	return pipelineJobResult{Tasks: taskResults}
+}
+
+func sortTaskResultsTopological(taskResults []taskResult) {
+	ranks := make(map[string]int)
+	// Store a temporary graph for marking of processed vertices
+	vertices := make(map[string]*taskResult)
+	queue := make([]string, 0)
+
+	for _, t := range taskResults {
+		// Add to temporary graph
+		tt := t
+		vertices[t.Name] = &tt
+
+		// Check if indegree(v) = 0
+		if len(t.EdgesFrom) == 0 {
+			ranks[t.Name] = 0
+			queue = append(queue, t.Name)
+			delete(vertices, t.Name)
+		}
+	}
+
+	for len(queue) > 0 {
+		v := queue[0]
+		queue = queue[1:]
+
+		for w, t := range vertices {
+			// Recalculate indegree(w) by checking which incoming edges are still in the graph
+			inDeg := 0
+			for _, e := range t.EdgesFrom {
+				if _, exists := vertices[e]; exists {
+					inDeg++
+				}
+			}
+
+			if inDeg == 0 {
+				ranks[w] = ranks[v] + 1
+				queue = append(queue, w)
+				delete(vertices, t.Name)
+			}
+		}
+	}
+
+	sort.Slice(taskResults, func(i, j int) bool {
+		ri := ranks[taskResults[i].Name]
+		rj := ranks[taskResults[j].Name]
+		if ri == rj {
+			return taskResults[i].Name < taskResults[j].Name
+		}
+		return ri < rj
+	})
 }
 
 func toStatus(status int32) string {
