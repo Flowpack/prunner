@@ -16,10 +16,14 @@ import (
 	"github.com/friendsofgo/errors"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
+	"gopkg.in/yaml.v2"
+	"networkteam.com/lab/prunner/helper"
+
 	"networkteam.com/lab/prunner/definition"
 )
 
@@ -36,7 +40,15 @@ func main() {
 	log.SetHandler(text.New(os.Stderr))
 
 	// TODO Generate secret/JWT on first start (if not present / configured) and output on CLI
-	// TODO Add JWT auth middleware
+	c, err := loadOrCreateConfig(".prunner.yml")
+	failErr(err)
+
+	tokenAuth := jwtauth.New("HS256", []byte(c.JWTSecret), nil)
+
+	claims := make(map[string]interface{})
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := tokenAuth.Encode(claims)
+	log.Infof("Send the following example JWT in Authorization header as 'Bearer [Token]' for API authentication: %s\n\n", tokenString)
 
 	// Load declared pipelines
 
@@ -58,6 +70,10 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+	// Seek, verify and validate JWT tokens
+	r.Use(jwtauth.Verifier(tokenAuth))
+	// Handle valid / invalid tokens
+	r.Use(jwtauth.Authenticator)
 
 	r.Route("/pipelines", func(r chi.Router) {
 		r.Get("/", h.pipelines)
@@ -65,10 +81,57 @@ func main() {
 		r.Post("/schedule", h.pipelinesSchedule)
 	})
 
-	address := ":9009"
+	address := "localhost:9009"
 	log.Infof("HTTP API Listening on %s", address)
 	err = http.ListenAndServe(address, r)
 	failErr(err)
+}
+
+type config struct {
+	JWTSecret string
+}
+
+func loadOrCreateConfig(configPath string) (*config, error) {
+	f, err := os.Open(configPath)
+	if os.IsNotExist(err) {
+		log.Infof("No config found, creating file at %s", configPath)
+		return createDefaultConfig(configPath)
+	} else if err != nil {
+		return nil, errors.Wrap(err, "opening config file")
+	}
+	defer f.Close()
+
+	c := new(config)
+
+	err = yaml.NewDecoder(f).Decode(c)
+	if err != nil {
+		return nil, errors.Wrap(err, "decoding config")
+	}
+
+	return c, nil
+}
+
+func createDefaultConfig(configPath string) (*config, error) {
+	f, err := os.Create(configPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "creating config file")
+	}
+	defer f.Close()
+
+	jwtSecret, err := helper.GenerateRandomString(32)
+	if err != nil {
+		return nil, errors.Wrap(err, "generating random string")
+	}
+	c := &config{
+		JWTSecret: jwtSecret,
+	}
+
+	err = yaml.NewEncoder(f).Encode(c)
+	if err != nil {
+		return nil, errors.Wrap(err, "encoding config")
+	}
+
+	return c, nil
 }
 
 func newPipelineRunner() (*pipelineRunner, error) {
@@ -368,6 +431,8 @@ func graphToPipelineJobResult(g *scheduler.ExecutionGraph) pipelineJobResult {
 }
 
 func sortTaskResultsTopological(taskResults []taskResult) {
+	// Calculate rank of vertices in DAG (see https://www.iarcs.org.in/inoi/online-study-material/topics/dags.php)
+
 	ranks := make(map[string]int)
 	// Store a temporary graph for marking of processed vertices
 	vertices := make(map[string]*taskResult)
