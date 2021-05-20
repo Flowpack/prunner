@@ -6,15 +6,15 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func Test_sortTaskResultsTopological(t *testing.T) {
+func Test_sortTaskNodesTopological(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    []taskResult
+		input    []taskNode
 		expected []string
 	}{
 		{
 			name: "no dependencies",
-			input: []taskResult{
+			input: []taskNode{
 				{
 					Name: "zeta",
 				},
@@ -26,49 +26,59 @@ func Test_sortTaskResultsTopological(t *testing.T) {
 		},
 		{
 			name: "simple dep",
-			input: []taskResult{
+			input: []taskNode{
 				{
 					Name:      "b",
 					EdgesFrom: []string{"a"},
 				},
 				{
-					Name:    "a",
-					EdgesTo: []string{"b"},
+					Name: "a",
 				},
 			},
 			expected: []string{"a", "b"},
 		},
 		{
-			name: "complex dep",
-			input: []taskResult{
+			name: "chain",
+			input: []taskNode{
 				{
-					Name:    "a",
-					EdgesTo: []string{"d", "b", "e"},
+					Name:      "site_export",
+					EdgesFrom: []string{"prepare_directory"},
+				},
+				{
+					Name:      "build_archive",
+					EdgesFrom: []string{"site_export"},
+				},
+				{
+					Name: "prepare_directory",
+				},
+			},
+			expected: []string{"prepare_directory", "site_export", "build_archive"},
+		},
+		{
+			name: "complex dep",
+			input: []taskNode{
+				{
+					Name: "a",
 				},
 				{
 					Name:      "b",
 					EdgesFrom: []string{"a", "e"},
-					EdgesTo:   []string{"c", "f"},
 				},
 				{
 					Name:      "c",
 					EdgesFrom: []string{"d", "b"},
-					EdgesTo:   []string{"g"},
 				},
 				{
 					Name:      "d",
 					EdgesFrom: []string{"a"},
-					EdgesTo:   []string{"c"},
 				},
 				{
 					Name:      "e",
 					EdgesFrom: []string{"a"},
-					EdgesTo:   []string{"b", "f"},
 				},
 				{
 					Name:      "f",
 					EdgesFrom: []string{"b", "e"},
-					EdgesTo:   []string{"g"},
 				},
 				{
 					Name:      "g",
@@ -80,7 +90,7 @@ func Test_sortTaskResultsTopological(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sortTaskResultsTopological(tt.input)
+			sortTaskNodesTopological(tt.input)
 
 			var order []string
 			for _, t := range tt.input {

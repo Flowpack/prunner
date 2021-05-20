@@ -22,9 +22,9 @@ import (
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
 	"gopkg.in/yaml.v2"
-	"networkteam.com/lab/prunner/helper"
 
 	"networkteam.com/lab/prunner/definition"
+	"networkteam.com/lab/prunner/helper"
 )
 
 type scheduleInput struct {
@@ -32,14 +32,13 @@ type scheduleInput struct {
 }
 
 func main() {
-	path := "./examples"
+	path := "."
 	pattern := "**/pipelines.{yml,yaml}"
 
 	log.SetLevel(log.DebugLevel)
 	// TODO Use different handler when not running in TTY
 	log.SetHandler(text.New(os.Stderr))
 
-	// TODO Generate secret/JWT on first start (if not present / configured) and output on CLI
 	c, err := loadOrCreateConfig(".prunner.yml")
 	failErr(err)
 
@@ -48,12 +47,14 @@ func main() {
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
 	_, tokenString, _ := tokenAuth.Encode(claims)
-	log.Infof("Send the following example JWT in Authorization header as 'Bearer [Token]' for API authentication: %s\n\n", tokenString)
+	log.Debugf("Send the following example JWT in Authorization header as 'Bearer [Token]' for API authentication: %s\n\n", tokenString)
 
 	// Load declared pipelines
 
 	defs, err := definition.LoadRecursively(filepath.Join(path, pattern))
 	failErr(err)
+
+	log.Debugf("Loaded %d pipeline definitions", len(defs.Pipelines))
 
 	// TODO Reload pipelines on file changes
 
@@ -88,7 +89,19 @@ func main() {
 }
 
 type config struct {
-	JWTSecret string
+	JWTSecret string `yaml:"jwt_secret"`
+}
+
+func (c config) validate() error {
+	if c.JWTSecret == "" {
+		return errors.New("missing jwt_secret")
+	}
+	const minJWTSecretLength = 16
+	if len(c.JWTSecret) < minJWTSecretLength {
+		return errors.Errorf("jwt_secret must be at least %d characters long", minJWTSecretLength)
+	}
+
+	return nil
 }
 
 func loadOrCreateConfig(configPath string) (*config, error) {
@@ -106,6 +119,11 @@ func loadOrCreateConfig(configPath string) (*config, error) {
 	err = yaml.NewDecoder(f).Decode(c)
 	if err != nil {
 		return nil, errors.Wrap(err, "decoding config")
+	}
+
+	err = c.validate()
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid config")
 	}
 
 	return c, nil
@@ -163,11 +181,35 @@ type pipelineJob struct {
 	Completed bool
 	Start     time.Time
 	End       time.Time
+	User      string
 
 	graph *scheduler.ExecutionGraph
+	// order of tasks sorted 1. by topology (rank in DAG) and 2. by name ascending
+	taskOrder map[string]int
 }
 
-func (r *pipelineRunner) ScheduleAsync(pipeline string) (*pipelineJob, error) {
+func (j *pipelineJob) calculateTaskOrder() {
+	var nodes []taskNode
+	for _, stage := range j.graph.Nodes() {
+		nodes = append(nodes, taskNode{
+			Name:      stage.Name,
+			EdgesFrom: stage.DependsOn,
+		})
+	}
+
+	sortTaskNodesTopological(nodes)
+
+	taskOrder := make(map[string]int)
+	for i, v := range nodes {
+		taskOrder[v.Name] = i
+	}
+
+	log.Debugf("Calculated task order: %v", nodes)
+
+	j.taskOrder = taskOrder
+}
+
+func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -215,8 +257,10 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string) (*pipelineJob, error) {
 		ID:       id,
 		Pipeline: pipeline,
 		Start:    time.Now(),
+		User:     opts.User,
 		graph:    g,
 	}
+	job.calculateTaskOrder()
 
 	r.jobs[id] = job
 
@@ -253,13 +297,7 @@ func (r *pipelineRunner) ListJobs() []pipelineJobResult {
 	res := []pipelineJobResult{}
 
 	for _, pJob := range r.jobs {
-		jobRes := graphToPipelineJobResult(pJob.graph)
-		jobRes.ID = pJob.ID
-		jobRes.Pipeline = pJob.Pipeline
-		jobRes.Completed = pJob.Completed
-		jobRes.Errored = pJob.graph.LastError() != nil
-		jobRes.Start = pJob.Start
-		jobRes.End = pJob.End
+		jobRes := jobToResult(pJob)
 		res = append(res, jobRes)
 	}
 
@@ -306,25 +344,40 @@ type handler struct {
 	pRunner *pipelineRunner
 }
 
+type ScheduleOpts struct {
+	User string
+}
+
 func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
+	_, claims, _ := jwtauth.FromContext(r.Context())
+	var user string
+	if sub, ok := claims["sub"].(string); ok {
+		user = sub
+	}
+
 	var in scheduleInput
 	err := json.NewDecoder(r.Body).Decode(&in)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, "Error decoding JSON: %v", err)
+		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error decoding JSON: %v", err))
 		return
 	}
 
-	log.Infof("Scheduling pipeline %s", in.Pipeline)
+	log.
+		WithField("pipeline", in.Pipeline).
+		WithField("user", user).
+		Info("Scheduling pipeline")
 
-	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline)
+	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, "Error scheduling pipeline: %v", err)
+		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
 		return
 	}
 
-	log.Debugf("Job %s scheduled", pJob.ID)
+	log.
+		WithField("jobID", pJob.ID).
+		WithField("pipeline", in.Pipeline).
+		WithField("user", user).
+		Debug("Job scheduled")
 
 	w.WriteHeader(http.StatusAccepted)
 
@@ -332,7 +385,18 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(struct {
 		JobID string `json:"jobId"`
-	}{JobID: pJob.ID.String()})
+	}{
+		JobID: pJob.ID.String(),
+	})
+}
+
+func (h *handler) sendError(w http.ResponseWriter, code int, msg string) {
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{
+		Error: msg,
+	})
 }
 
 type pipelinesJobsResponse struct {
@@ -365,18 +429,16 @@ func (h *handler) pipelines(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskResult struct {
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	Start     time.Time `json:"start"`
-	End       time.Time `json:"end"`
-	Skipped   bool      `json:"skipped"`
-	ExitCode  int16     `json:"exitCode"`
-	Errored   bool      `json:"errored"`
-	Error     *string   `json:"error"`
-	Stdout    string    `json:"stdout"`
-	Stderr    string    `json:"stderr"`
-	EdgesFrom []string  `json:"edgesFrom"`
-	EdgesTo   []string  `json:"edgesTo"`
+	Name     string    `json:"name"`
+	Status   string    `json:"status"`
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	Skipped  bool      `json:"skipped"`
+	ExitCode int16     `json:"exitCode"`
+	Errored  bool      `json:"errored"`
+	Error    *string   `json:"error"`
+	Stdout   string    `json:"stdout"`
+	Stderr   string    `json:"stderr"`
 }
 
 type pipelineJobResult struct {
@@ -387,6 +449,7 @@ type pipelineJobResult struct {
 	Errored   bool         `json:"errored"`
 	Start     time.Time    `json:"start"`
 	End       time.Time    `json:"end"`
+	User      string       `json:"user"`
 }
 
 type pipelineResult struct {
@@ -395,17 +458,15 @@ type pipelineResult struct {
 	Running    bool   `json:"running"`
 }
 
-func graphToPipelineJobResult(g *scheduler.ExecutionGraph) pipelineJobResult {
+func jobToResult(j *pipelineJob) pipelineJobResult {
 	var taskResults []taskResult
 
-	for _, stage := range g.Nodes() {
+	for _, stage := range j.graph.Nodes() {
 		res := taskResult{
-			Name:      stage.Name,
-			Status:    toStatus(stage.Status),
-			Start:     stage.Start,
-			End:       stage.End,
-			EdgesFrom: g.To(stage.Name),
-			EdgesTo:   g.From(stage.Name),
+			Name:   stage.Name,
+			Status: toStatus(stage.ReadStatus()),
+			Start:  stage.Start,
+			End:    stage.End,
 		}
 
 		t := stage.Task
@@ -425,58 +486,83 @@ func graphToPipelineJobResult(g *scheduler.ExecutionGraph) pipelineJobResult {
 		taskResults = append(taskResults, res)
 	}
 
-	sortTaskResultsTopological(taskResults)
+	sort.Slice(taskResults, func(x, y int) bool {
+		return j.taskOrder[taskResults[x].Name] < j.taskOrder[taskResults[y].Name]
+	})
 
-	return pipelineJobResult{Tasks: taskResults}
+	return pipelineJobResult{
+		Tasks:     taskResults,
+		ID:        j.ID,
+		Pipeline:  j.Pipeline,
+		Completed: j.Completed,
+		Errored:   j.graph.LastError() != nil,
+		Start:     j.Start,
+		End:       j.End,
+		User:      j.User,
+	}
 }
 
-func sortTaskResultsTopological(taskResults []taskResult) {
-	// Calculate rank of vertices in DAG (see https://www.iarcs.org.in/inoi/online-study-material/topics/dags.php)
+type taskNode struct {
+	Name      string
+	EdgesFrom []string
+}
 
-	ranks := make(map[string]int)
-	// Store a temporary graph for marking of processed vertices
-	vertices := make(map[string]*taskResult)
-	queue := make([]string, 0)
+func sortTaskNodesTopological(nodes []taskNode) {
+	// Apply topological sorting (see https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm)
 
-	for _, t := range taskResults {
-		// Add to temporary graph
-		tt := t
-		vertices[t.Name] = &tt
+	var queue []string
 
-		// Check if indegree(v) = 0
-		if len(t.EdgesFrom) == 0 {
-			ranks[t.Name] = 0
-			queue = append(queue, t.Name)
-			delete(vertices, t.Name)
-		}
+	type tmpNode struct {
+		name     string
+		incoming map[string]struct{}
+		order    int
 	}
 
+	tmpNodes := make(map[string]*tmpNode)
+
+	// Build temporary graph
+	for _, n := range nodes {
+		inc := make(map[string]struct{})
+		for _, from := range n.EdgesFrom {
+			inc[from] = struct{}{}
+		}
+		tmpNodes[n.Name] = &tmpNode{
+			name:     n.Name,
+			incoming: inc,
+		}
+		if len(inc) == 0 {
+			queue = append(queue, n.Name)
+		}
+	}
+	// Make sure a stable sorting is used for the traversal of nodes (map has no order)
+	sort.Strings(queue)
+
+	i := 0
 	for len(queue) > 0 {
-		v := queue[0]
+		n := queue[0]
 		queue = queue[1:]
 
-		for w, t := range vertices {
-			// Recalculate indegree(w) by checking which incoming edges are still in the graph
-			inDeg := 0
-			for _, e := range t.EdgesFrom {
-				if _, exists := vertices[e]; exists {
-					inDeg++
+		tmpNodes[n].order = i
+		i++
+
+		for _, m := range tmpNodes {
+			if _, exist := m.incoming[n]; exist {
+				delete(m.incoming, n)
+
+				if len(m.incoming) == 0 {
+					queue = append(queue, m.name)
 				}
 			}
-
-			if inDeg == 0 {
-				ranks[w] = ranks[v] + 1
-				queue = append(queue, w)
-				delete(vertices, t.Name)
-			}
 		}
+		sort.Strings(queue)
 	}
 
-	sort.Slice(taskResults, func(i, j int) bool {
-		ri := ranks[taskResults[i].Name]
-		rj := ranks[taskResults[j].Name]
+	sort.Slice(nodes, func(i, j int) bool {
+		ri := tmpNodes[nodes[i].Name].order
+		rj := tmpNodes[nodes[j].Name].order
+		// For same rank order by name
 		if ri == rj {
-			return taskResults[i].Name < taskResults[j].Name
+			return nodes[i].Name < nodes[j].Name
 		}
 		return ri < rj
 	})
