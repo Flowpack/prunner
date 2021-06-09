@@ -534,7 +534,7 @@ func sortTaskNodesTopological(nodes []taskNode) {
 			queue = append(queue, n.Name)
 		}
 	}
-	// Make sure a stable sorting is used for the traversal of nodes (map has no order)
+	// Make sure a stable sorting is used for the traversal of nodes (map has no defined order)
 	sort.Strings(queue)
 
 	i := 0
