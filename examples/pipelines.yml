@@ -62,3 +62,33 @@ pipelines:
       no-work:
         script:
           - go for a walk
+
+  queue_it:
+    concurrency: 2
+    tasks:
+      lint:
+        script:
+          - echo "Starting something busy"
+          - sleep 3
+          - echo "25% done"
+          - sleep 2
+          - echo "50% done"
+          - sleep 4
+          - echo "75% done"
+          - sleep 1
+          - echo "100% done"
+
+  replace_it:
+    queue_strategy: replace
+    tasks:
+      lint:
+        script:
+          - echo "Starting something busy"
+          - sleep 2
+          - echo "25% done"
+          - sleep 3
+          - echo "50% done"
+          - sleep 4
+          - echo "75% done"
+          - sleep 2
+          - echo "100% done"

@@ -45,6 +45,7 @@ func (d *PipelinesDef) Load(path string) error {
 	if err != nil {
 		return errors.Wrap(err, "decoding YAML")
 	}
+	localDef.setDefaults()
 
 	for pipelineName, pipelineDef := range localDef.Pipelines {
 		if p, exists := d.Pipelines[pipelineName]; exists {

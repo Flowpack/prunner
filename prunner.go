@@ -113,16 +113,20 @@ func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 	sched := scheduler.NewScheduler(taskRunner)
 
 	return &pipelineRunner{
-		defs:  defs,
-		sched: sched,
-		jobs:  make(map[uuid.UUID]*pipelineJob),
+		defs:               defs,
+		sched:              sched,
+		jobsByID:           make(map[uuid.UUID]*pipelineJob),
+		jobsByPipeline:     make(map[string][]*pipelineJob),
+		waitListByPipeline: make(map[string][]*pipelineJob),
 	}, nil
 }
 
 type pipelineRunner struct {
-	sched *scheduler.Scheduler
-	defs  *definition.PipelinesDef
-	jobs  map[uuid.UUID]*pipelineJob
+	sched              *scheduler.Scheduler
+	defs               *definition.PipelinesDef
+	jobsByID           map[uuid.UUID]*pipelineJob
+	jobsByPipeline     map[string][]*pipelineJob
+	waitListByPipeline map[string][]*pipelineJob
 
 	mx sync.RWMutex
 }
@@ -131,9 +135,14 @@ type pipelineJob struct {
 	ID        uuid.UUID
 	Pipeline  string
 	Completed bool
-	Start     time.Time
-	End       time.Time
-	User      string
+	Canceled  bool
+	// Created is the schedule / queue time of the job
+	Created time.Time
+	// Start is the actual start time of the job
+	Start *time.Time
+	// End is the actual end time of the job (can be nil if incomplete)
+	End  *time.Time
+	User string
 
 	graph *scheduler.ExecutionGraph
 	// order of tasks sorted 1. by topology (rank in DAG) and 2. by name ascending
@@ -159,6 +168,19 @@ func (j *pipelineJob) calculateTaskOrder() {
 	j.taskOrder = taskOrder
 }
 
+type scheduleAction int
+
+const (
+	scheduleActionStart scheduleAction = iota
+	scheduleActionQueue
+	scheduleActionReplace
+	scheduleActionNoQueue
+	scheduleActionQueueFull
+)
+
+var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipeline")
+var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
+
 func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
@@ -168,13 +190,13 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 		return nil, errors.Errorf("pipeline %q is not defined", pipeline)
 	}
 
-	// If pipeline does not allow concurrent runs: check if same pipeline is not running already
-	if !pipelineDef.Concurrent {
-		for _, job := range r.jobs {
-			if !job.Completed && job.Pipeline == pipeline {
-				return nil, errors.Errorf("pipeline %q is already running and not marked as concurrent", pipeline)
-			}
-		}
+	action := r.resolveScheduleAction(pipeline)
+
+	switch action {
+	case scheduleActionNoQueue:
+		return nil, errNoQueue
+	case scheduleActionQueueFull:
+		return nil, errQueueFull
 	}
 
 	var stages []*scheduler.Stage
@@ -206,40 +228,100 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 	job := &pipelineJob{
 		ID:       id,
 		Pipeline: pipeline,
-		Start:    time.Now(),
+		Created:  time.Now(),
 		User:     opts.User,
 		graph:    g,
 	}
 	job.calculateTaskOrder()
 
-	r.jobs[id] = job
+	r.jobsByID[id] = job
+	r.jobsByPipeline[pipeline] = append(r.jobsByPipeline[pipeline], job)
+
+	switch action {
+	case scheduleActionQueue:
+		r.waitListByPipeline[pipeline] = append(r.waitListByPipeline[pipeline], job)
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			Debugf("Queued: added job to wait list")
+
+		return job, nil
+	case scheduleActionReplace:
+		waitList := r.waitListByPipeline[pipeline]
+		previousJob := waitList[len(waitList)-1]
+		previousJob.Canceled = true
+		waitList[len(waitList)-1] = job
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			Debugf("Queued: replaced job on wait list")
+
+		return job, nil
+	}
 
 	// TODO Add possibility to cancel a running job (e.g. inject cancelable context in task nodes?)
-	// Run graph asynchronously
-	go func() {
-		_ = r.sched.Schedule(g)
-		r.jobCompleted(job.ID)
-	}()
+
+	r.startJob(job)
+
+	log.
+		WithField("component", "runner").
+		WithField("pipeline", job.Pipeline).
+		WithField("jobID", job.ID).
+		Debugf("Started: scheduled job execution")
 
 	return job, nil
+}
+
+func (r *pipelineRunner) startJob(job *pipelineJob) {
+	// Actually start job
+	now := time.Now()
+	job.Start = &now
+
+	// Run graph asynchronously
+	go func() {
+		_ = r.sched.Schedule(job.graph)
+		r.jobCompleted(job.ID)
+	}()
 }
 
 func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
-	job := r.jobs[id]
+	job := r.jobsByID[id]
 	if job == nil {
 		return
 	}
 	job.Completed = true
-	job.End = time.Now()
+	now := time.Now()
+	job.End = &now
 
 	log.
 		WithField("component", "runner").
 		WithField("jobID", id).
 		WithField("pipeline", job.Pipeline).
 		Debug("Job completed")
+
+	// Check wait list if another job is queued
+	waitList := r.waitListByPipeline[job.Pipeline]
+	// Schedule as many jobs as are schedulable
+	for len(waitList) > 0 && r.isSchedulable(job.Pipeline) {
+		queuedJob := waitList[0]
+		waitList = waitList[1:]
+
+		r.startJob(queuedJob)
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", queuedJob.Pipeline).
+			WithField("jobID", queuedJob.ID).
+			Debugf("Dequeue: scheduled job execution")
+	}
+	r.waitListByPipeline[job.Pipeline] = waitList
 
 	// TODO Persist job results and remove from in-memory map
 }
@@ -250,13 +332,13 @@ func (r *pipelineRunner) ListJobs() []pipelineJobResult {
 
 	res := []pipelineJobResult{}
 
-	for _, pJob := range r.jobs {
+	for _, pJob := range r.jobsByID {
 		jobRes := jobToResult(pJob)
 		res = append(res, jobRes)
 	}
 
 	sort.Slice(res, func(i, j int) bool {
-		return !res[i].Start.Before(res[j].Start)
+		return !res[i].Created.Before(res[j].Created)
 	})
 
 	return res
@@ -268,13 +350,13 @@ func (r *pipelineRunner) ListPipelines() []pipelineResult {
 
 	res := []pipelineResult{}
 
-	for pipeline, pipelineDef := range r.defs.Pipelines {
+	for pipeline := range r.defs.Pipelines {
 		running := r.isRunning(pipeline)
 
 		res = append(res, pipelineResult{
-			Pipeline:   pipeline,
-			Concurrent: pipelineDef.Concurrent,
-			Running:    running,
+			Pipeline:    pipeline,
+			Schedulable: r.isSchedulable(pipeline),
+			Running:     running,
 		})
 	}
 
@@ -286,10 +368,60 @@ func (r *pipelineRunner) ListPipelines() []pipelineResult {
 }
 
 func (r *pipelineRunner) isRunning(pipeline string) bool {
-	for _, job := range r.jobs {
-		if !job.Completed && job.Pipeline == pipeline {
+	for _, job := range r.jobsByPipeline[pipeline] {
+		if !job.Completed {
 			return true
 		}
+	}
+	return false
+}
+
+func (r *pipelineRunner) runningJobsCount(pipeline string) int {
+	running := 0
+	for _, job := range r.jobsByPipeline[pipeline] {
+		if job.Start != nil && !job.Completed {
+			running++
+		}
+	}
+	return running
+}
+
+func (r *pipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
+	pipelineDef := r.defs.Pipelines[pipeline]
+
+	runningJobsCount := r.runningJobsCount(pipeline)
+	if runningJobsCount >= pipelineDef.Concurrency {
+		// Check if jobs should be queued if concurrency factor is exceeded
+		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
+			return scheduleActionNoQueue
+		}
+
+		// Check if a queued job on the wait list should be replaced depending on queue strategy
+		waitList := r.waitListByPipeline[pipeline]
+		if pipelineDef.QueueStrategy == definition.QueueStrategyReplace && len(waitList) > 0 {
+			return scheduleActionReplace
+		}
+
+		// Error if there is a queue limit and the number of queued jobs exceeds the allowed queue limit
+		if pipelineDef.QueueLimit != nil && len(waitList) >= *pipelineDef.QueueLimit {
+			return scheduleActionQueueFull
+		}
+
+		return scheduleActionQueue
+	}
+
+	return scheduleActionStart
+}
+
+func (r *pipelineRunner) isSchedulable(pipeline string) bool {
+	action := r.resolveScheduleAction(pipeline)
+	switch action {
+	case scheduleActionReplace:
+		fallthrough
+	case scheduleActionQueue:
+		fallthrough
+	case scheduleActionStart:
+		return true
 	}
 	return false
 }
@@ -318,6 +450,8 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 
 	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
 	if err != nil {
+		// TODO Send JSON error and include expected errors
+
 		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
 		return
 	}
@@ -396,16 +530,18 @@ type pipelineJobResult struct {
 	Pipeline  string       `json:"pipeline"`
 	Tasks     []taskResult `json:"tasks"`
 	Completed bool         `json:"completed"`
+	Canceled  bool         `json:"canceled"`
 	Errored   bool         `json:"errored"`
-	Start     time.Time    `json:"start"`
-	End       time.Time    `json:"end"`
+	Created   time.Time    `json:"created"`
+	Start     *time.Time   `json:"start"`
+	End       *time.Time   `json:"end"`
 	User      string       `json:"user"`
 }
 
 type pipelineResult struct {
-	Pipeline   string `json:"pipeline"`
-	Concurrent bool   `json:"concurrent"`
-	Running    bool   `json:"running"`
+	Pipeline    string `json:"pipeline"`
+	Schedulable bool   `json:"schedulable"`
+	Running     bool   `json:"running"`
 }
 
 func jobToResult(j *pipelineJob) pipelineJobResult {
@@ -445,7 +581,9 @@ func jobToResult(j *pipelineJob) pipelineJobResult {
 		ID:        j.ID,
 		Pipeline:  j.Pipeline,
 		Completed: j.Completed,
+		Canceled:  j.Canceled,
 		Errored:   j.graph.LastError() != nil,
+		Created:   j.Created,
 		Start:     j.Start,
 		End:       j.End,
 		User:      j.User,
