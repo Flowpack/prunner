@@ -1,18 +1,16 @@
-package main
+package prunner
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/apex/log"
-	"github.com/apex/log/handlers/text"
 	"github.com/friendsofgo/errors"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -21,47 +19,63 @@ import (
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
-	"gopkg.in/yaml.v2"
-
+	"github.com/urfave/cli/v2"
 	"networkteam.com/lab/prunner/definition"
-	"networkteam.com/lab/prunner/helper"
 )
 
 type scheduleInput struct {
 	Pipeline string
 }
 
-func main() {
-	path := "."
-	pattern := "**/pipelines.{yml,yaml}"
+func newDebugCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "debug",
+		Usage: "Get authorization information for debugging",
+		Action: func(c *cli.Context) error {
+			conf, err := loadOrCreateConfig(c.String("config"))
+			if err != nil {
+				return err
+			}
 
-	log.SetLevel(log.DebugLevel)
-	// TODO Use different handler when not running in TTY
-	log.SetHandler(text.New(os.Stderr))
+			tokenAuth := jwtauth.New("HS256", []byte(conf.JWTSecret), nil)
 
-	c, err := loadOrCreateConfig(".prunner.yml")
-	failErr(err)
+			claims := make(map[string]interface{})
+			jwtauth.SetIssuedNow(claims)
+			_, tokenString, _ := tokenAuth.Encode(claims)
+			log.Infof("Send the following HTTP header for JWT authorization:\n    Authorization: Bearer %s", tokenString)
 
-	tokenAuth := jwtauth.New("HS256", []byte(c.JWTSecret), nil)
+			return nil
+		},
+	}
+}
 
-	claims := make(map[string]interface{})
-	jwtauth.SetIssuedNow(claims)
-	_, tokenString, _ := tokenAuth.Encode(claims)
-	log.Debugf("Send the following example JWT in Authorization header as 'Bearer [Token]' for API authentication: %s\n\n", tokenString)
+func run(c *cli.Context) error {
+	conf, err := loadOrCreateConfig(c.String("config"))
+	if err != nil {
+		return err
+	}
+
+	tokenAuth := jwtauth.New("HS256", []byte(conf.JWTSecret), nil)
 
 	// Load declared pipelines
 
-	defs, err := definition.LoadRecursively(filepath.Join(path, pattern))
-	failErr(err)
+	defs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
+	if err != nil {
+		return errors.Wrap(err, "loading definitions")
+	}
 
-	log.Debugf("Loaded %d pipeline definitions", len(defs.Pipelines))
+	log.
+		WithField("component", "cli").
+		WithField("pipelines", defs.Pipelines.NamesWithSourcePath()).
+		Infof("Loaded %d pipeline definitions", len(defs.Pipelines))
 
 	// TODO Reload pipelines on file changes
 
 	// Set up pipeline runner
-	pRunner, err := newPipelineRunner()
-	failErr(err)
-	pRunner.defs = defs
+	pRunner, err := newPipelineRunner(defs)
+	if err != nil {
+		return err
+	}
 
 	h := handler{
 		pRunner: pRunner,
@@ -70,7 +84,8 @@ func main() {
 	// Set up a simple REST API for listing jobs and scheduling pipelines
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(newHttpLogger(c))
+	r.Use(middleware.Recoverer)
 	// Seek, verify and validate JWT tokens
 	r.Use(jwtauth.Verifier(tokenAuth))
 	// Handle valid / invalid tokens
@@ -82,77 +97,13 @@ func main() {
 		r.Post("/schedule", h.pipelinesSchedule)
 	})
 
-	address := "localhost:9009"
-	log.Infof("HTTP API Listening on %s", address)
-	err = http.ListenAndServe(address, r)
-	failErr(err)
+	log.
+		WithField("component", "cli").
+		Infof("HTTP API Listening on %s", c.String("address"))
+	return http.ListenAndServe(c.String("address"), r)
 }
 
-type config struct {
-	JWTSecret string `yaml:"jwt_secret"`
-}
-
-func (c config) validate() error {
-	if c.JWTSecret == "" {
-		return errors.New("missing jwt_secret")
-	}
-	const minJWTSecretLength = 16
-	if len(c.JWTSecret) < minJWTSecretLength {
-		return errors.Errorf("jwt_secret must be at least %d characters long", minJWTSecretLength)
-	}
-
-	return nil
-}
-
-func loadOrCreateConfig(configPath string) (*config, error) {
-	f, err := os.Open(configPath)
-	if os.IsNotExist(err) {
-		log.Infof("No config found, creating file at %s", configPath)
-		return createDefaultConfig(configPath)
-	} else if err != nil {
-		return nil, errors.Wrap(err, "opening config file")
-	}
-	defer f.Close()
-
-	c := new(config)
-
-	err = yaml.NewDecoder(f).Decode(c)
-	if err != nil {
-		return nil, errors.Wrap(err, "decoding config")
-	}
-
-	err = c.validate()
-	if err != nil {
-		return nil, errors.Wrap(err, "invalid config")
-	}
-
-	return c, nil
-}
-
-func createDefaultConfig(configPath string) (*config, error) {
-	f, err := os.Create(configPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "creating config file")
-	}
-	defer f.Close()
-
-	jwtSecret, err := helper.GenerateRandomString(32)
-	if err != nil {
-		return nil, errors.Wrap(err, "generating random string")
-	}
-	c := &config{
-		JWTSecret: jwtSecret,
-	}
-
-	err = yaml.NewEncoder(f).Encode(c)
-	if err != nil {
-		return nil, errors.Wrap(err, "encoding config")
-	}
-
-	return c, nil
-}
-
-func newPipelineRunner() (*pipelineRunner, error) {
+func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 	taskRunner, err := runner.NewTaskRunner()
 	if err != nil {
 		return nil, errors.Wrap(err, "building task runner")
@@ -162,6 +113,7 @@ func newPipelineRunner() (*pipelineRunner, error) {
 	sched := scheduler.NewScheduler(taskRunner)
 
 	return &pipelineRunner{
+		defs:  defs,
 		sched: sched,
 		jobs:  make(map[uuid.UUID]*pipelineJob),
 	}, nil
@@ -203,8 +155,6 @@ func (j *pipelineJob) calculateTaskOrder() {
 	for i, v := range nodes {
 		taskOrder[v.Name] = i
 	}
-
-	log.Debugf("Calculated task order: %v", nodes)
 
 	j.taskOrder = taskOrder
 }
@@ -285,7 +235,11 @@ func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
 	job.Completed = true
 	job.End = time.Now()
 
-	log.Debugf("Job %s completed", id)
+	log.
+		WithField("component", "runner").
+		WithField("jobID", id).
+		WithField("pipeline", job.Pipeline).
+		Debug("Job completed")
 
 	// TODO Persist job results and remove from in-memory map
 }
@@ -362,11 +316,6 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.
-		WithField("pipeline", in.Pipeline).
-		WithField("user", user).
-		Info("Scheduling pipeline")
-
 	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
 	if err != nil {
 		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
@@ -374,15 +323,15 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.
+		WithField("component", "api").
 		WithField("jobID", pJob.ID).
 		WithField("pipeline", in.Pipeline).
 		WithField("user", user).
-		Debug("Job scheduled")
-
-	w.WriteHeader(http.StatusAccepted)
+		Info("Job scheduled")
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusAccepted)
+
 	_ = json.NewEncoder(w).Encode(struct {
 		JobID string `json:"jobId"`
 	}{
@@ -391,6 +340,7 @@ func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) sendError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(struct {
 		Error string `json:"error"`
@@ -584,11 +534,4 @@ func toStatus(status int32) string {
 		return "canceled"
 	}
 	return ""
-}
-
-func failErr(err error) {
-	if err != nil {
-		log.WithError(err).Errorf("Fatal error occurred")
-		os.Exit(1)
-	}
 }
