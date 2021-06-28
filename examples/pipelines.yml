@@ -65,6 +65,7 @@ pipelines:
 
   queue_it:
     concurrency: 2
+    queue_limit: 3
     tasks:
       lint:
         script:
