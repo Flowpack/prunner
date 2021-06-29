@@ -1,9 +1,11 @@
 package prunner
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -16,11 +18,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
-	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
+	"github.com/taskctl/taskctl/pkg/variables"
 	"github.com/urfave/cli/v2"
 	"networkteam.com/lab/prunner/definition"
+	"networkteam.com/lab/prunner/taskctl"
 )
 
 type scheduleInput struct {
@@ -104,7 +107,12 @@ func run(c *cli.Context) error {
 }
 
 func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
-	taskRunner, err := runner.NewTaskRunner()
+	outputStore, err := taskctl.NewOutputStore(".prunner")
+	if err != nil {
+		return nil, errors.Wrap(err, "building output store")
+	}
+
+	taskRunner, err := taskctl.NewTaskRunner(outputStore)
 	if err != nil {
 		return nil, errors.Wrap(err, "building task runner")
 	}
@@ -115,6 +123,8 @@ func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 	return &pipelineRunner{
 		defs:               defs,
 		sched:              sched,
+		taskRunner:         taskRunner,
+		outputStore:        outputStore,
 		jobsByID:           make(map[uuid.UUID]*pipelineJob),
 		jobsByPipeline:     make(map[string][]*pipelineJob),
 		waitListByPipeline: make(map[string][]*pipelineJob),
@@ -123,6 +133,8 @@ func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 
 type pipelineRunner struct {
 	sched              *scheduler.Scheduler
+	taskRunner         *taskctl.TaskRunner
+	outputStore        *taskctl.OutputStore
 	defs               *definition.PipelinesDef
 	jobsByID           map[uuid.UUID]*pipelineJob
 	jobsByPipeline     map[string][]*pipelineJob
@@ -201,6 +213,11 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 
 	var stages []*scheduler.Stage
 
+	id, err := uuid.NewV4()
+	if err != nil {
+		return nil, errors.Wrap(err, "generating job UUID")
+	}
+
 	for taskName, taskDef := range pipelineDef.Tasks {
 		t := task.FromCommands(taskDef.Script...)
 		t.Name = taskName
@@ -211,6 +228,10 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 			Task:         t,
 			DependsOn:    taskDef.DependsOn,
 			AllowFailure: taskDef.AllowFailure,
+			Variables: variables.FromMap(map[string]string{
+				// Inject job id for later use in the task runner
+				"jobID": id.String(),
+			}),
 		}
 
 		stages = append(stages, s)
@@ -221,10 +242,6 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 		return nil, errors.Wrap(err, "building execution graph")
 	}
 
-	id, err := uuid.NewV4()
-	if err != nil {
-		return nil, errors.Wrap(err, "generating job UUID")
-	}
 	job := &pipelineJob{
 		ID:       id,
 		Pipeline: pipeline,
@@ -333,7 +350,7 @@ func (r *pipelineRunner) ListJobs() []pipelineJobResult {
 	res := []pipelineJobResult{}
 
 	for _, pJob := range r.jobsByID {
-		jobRes := jobToResult(pJob)
+		jobRes := r.jobToResult(pJob)
 		res = append(res, jobRes)
 	}
 
@@ -544,7 +561,7 @@ type pipelineResult struct {
 	Running     bool   `json:"running"`
 }
 
-func jobToResult(j *pipelineJob) pipelineJobResult {
+func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 	var taskResults []taskResult
 
 	for _, stage := range j.graph.Nodes() {
@@ -557,13 +574,45 @@ func jobToResult(j *pipelineJob) pipelineJobResult {
 
 		t := stage.Task
 		if t != nil {
+
+			// TODO Move to separate endpoint for job output and optimize incremental line fetching
+			var (
+				stdout, stderr []byte
+			)
+			stdoutLines, stderrLines, ok := r.taskRunner.CurrentTaskOutput(t)
+			if ok {
+				stdout = bytes.Join(stdoutLines, []byte("\n"))
+				stderr = bytes.Join(stderrLines, []byte("\n"))
+			} else {
+				// TODO Move to methods for fetching from files
+				stdoutReader, err := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
+				if err != nil {
+					log.
+						WithError(err).
+						Errorf("failed to read output store")
+				} else {
+					stdout, _ = ioutil.ReadAll(stdoutReader)
+					stdoutReader.Close()
+				}
+
+				stderrReader, err := r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
+				if err != nil {
+					log.
+						WithError(err).
+						Errorf("failed to read output store")
+				} else {
+					stderr, _ = ioutil.ReadAll(stderrReader)
+					stderrReader.Close()
+				}
+			}
+
 			res.Start = t.Start
 			res.End = t.End
 			res.Skipped = t.Skipped
 			res.ExitCode = t.ExitCode
 			res.Errored = t.Errored
-			res.Stdout = t.Log.Stdout.String()
-			res.Stderr = t.Log.Stderr.String()
+			res.Stdout = string(stdout)
+			res.Stderr = string(stderr)
 			if t.Error != nil {
 				s := t.Error.Error()
 				res.Error = &s

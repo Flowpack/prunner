@@ -78,6 +78,7 @@ pipelines:
           - echo "75% done"
           - sleep 1
           - echo "100% done"
+          - echo -n "Last line"
 
   replace_it:
     queue_strategy: replace
@@ -93,3 +94,4 @@ pipelines:
           - echo "75% done"
           - sleep 2
           - echo "100% done"
+          - echo -n "Last line"
