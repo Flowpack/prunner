@@ -1,11 +1,7 @@
 package prunner
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -14,10 +10,9 @@ import (
 
 	"github.com/apex/log"
 	"github.com/friendsofgo/errors"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
+	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
 	"github.com/taskctl/taskctl/pkg/variables"
@@ -74,60 +69,46 @@ func run(c *cli.Context) error {
 
 	// TODO Reload pipelines on file changes
 
-	// Set up pipeline runner
-	pRunner, err := newPipelineRunner(defs)
-	if err != nil {
-		return err
-	}
-
-	h := handler{
-		pRunner: pRunner,
-	}
-
-	// Set up a simple REST API for listing jobs and scheduling pipelines
-
-	r := chi.NewRouter()
-	r.Use(newHttpLogger(c))
-	r.Use(middleware.Recoverer)
-	// Seek, verify and validate JWT tokens
-	r.Use(jwtauth.Verifier(tokenAuth))
-	// Handle valid / invalid tokens
-	r.Use(jwtauth.Authenticator)
-
-	r.Route("/pipelines", func(r chi.Router) {
-		r.Get("/", h.pipelines)
-		r.Get("/jobs", h.pipelinesJobs)
-		r.Post("/schedule", h.pipelinesSchedule)
-	})
-	r.Route("/job", func(r chi.Router) {
-		r.Get("/logs", h.jobLogs)
-	})
-
-	log.
-		WithField("component", "cli").
-		Infof("HTTP API Listening on %s", c.String("address"))
-	return http.ListenAndServe(c.String("address"), r)
-}
-
-func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 	outputStore, err := taskctl.NewOutputStore(".prunner")
 	if err != nil {
-		return nil, errors.Wrap(err, "building output store")
+		return errors.Wrap(err, "building output store")
 	}
 
 	taskRunner, err := taskctl.NewTaskRunner(outputStore)
 	if err != nil {
-		return nil, errors.Wrap(err, "building task runner")
+		return errors.Wrap(err, "building task runner")
 	}
 	taskRunner.Stdout = io.Discard
 	taskRunner.Stderr = io.Discard
+
+	// Set up pipeline runner
+	pRunner, err := newPipelineRunner(defs, taskRunner)
+	if err != nil {
+		return err
+	}
+
+	srv := newServer(
+		pRunner,
+		outputStore,
+		newHttpLogger(c),
+		tokenAuth,
+	)
+
+	// Set up a simple REST API for listing jobs and scheduling pipelines
+
+	log.
+		WithField("component", "cli").
+		Infof("HTTP API Listening on %s", c.String("address"))
+	return http.ListenAndServe(c.String("address"), srv)
+}
+
+func newPipelineRunner(defs *definition.PipelinesDef, taskRunner runner.Runner) (*pipelineRunner, error) {
 	sched := scheduler.NewScheduler(taskRunner)
 
 	return &pipelineRunner{
 		defs:               defs,
 		sched:              sched,
 		taskRunner:         taskRunner,
-		outputStore:        outputStore,
 		jobsByID:           make(map[uuid.UUID]*pipelineJob),
 		jobsByPipeline:     make(map[string][]*pipelineJob),
 		waitListByPipeline: make(map[string][]*pipelineJob),
@@ -136,8 +117,7 @@ func newPipelineRunner(defs *definition.PipelinesDef) (*pipelineRunner, error) {
 
 type pipelineRunner struct {
 	sched              *scheduler.Scheduler
-	taskRunner         *taskctl.TaskRunner
-	outputStore        *taskctl.OutputStore
+	taskRunner         runner.Runner
 	defs               *definition.PipelinesDef
 	jobsByID           map[uuid.UUID]*pipelineJob
 	jobsByPipeline     map[string][]*pipelineJob
@@ -336,7 +316,7 @@ func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
 	// Check wait list if another job is queued
 	waitList := r.waitListByPipeline[job.Pipeline]
 	// Schedule as many jobs as are schedulable
-	for len(waitList) > 0 && r.isSchedulable(job.Pipeline) {
+	for len(waitList) > 0 && r.resolveScheduleAction(job.Pipeline) == scheduleActionStart {
 		queuedJob := waitList[0]
 		waitList = waitList[1:]
 
@@ -453,159 +433,8 @@ func (r *pipelineRunner) isSchedulable(pipeline string) bool {
 	return false
 }
 
-type handler struct {
-	pRunner *pipelineRunner
-}
-
 type ScheduleOpts struct {
 	User string
-}
-
-func (h *handler) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
-	_, claims, _ := jwtauth.FromContext(r.Context())
-	var user string
-	if sub, ok := claims["sub"].(string); ok {
-		user = sub
-	}
-
-	var in scheduleInput
-	err := json.NewDecoder(r.Body).Decode(&in)
-	if err != nil {
-		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error decoding JSON: %v", err))
-		return
-	}
-
-	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
-	if err != nil {
-		// TODO Send JSON error and include expected errors
-
-		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
-		return
-	}
-
-	log.
-		WithField("component", "api").
-		WithField("jobID", pJob.ID).
-		WithField("pipeline", in.Pipeline).
-		WithField("user", user).
-		Info("Job scheduled")
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-
-	_ = json.NewEncoder(w).Encode(struct {
-		JobID string `json:"jobId"`
-	}{
-		JobID: pJob.ID.String(),
-	})
-}
-
-func (h *handler) sendError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(struct {
-		Error string `json:"error"`
-	}{
-		Error: msg,
-	})
-}
-
-type pipelinesJobsResponse struct {
-	Pipelines []pipelineResult    `json:"pipelines"`
-	Jobs      []pipelineJobResult `json:"jobs"`
-}
-
-func (h *handler) pipelinesJobs(w http.ResponseWriter, r *http.Request) {
-	pipelinesRes := h.pRunner.ListPipelines()
-	jobsRes := h.pRunner.ListJobs()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(pipelinesJobsResponse{
-		Pipelines: pipelinesRes,
-		Jobs:      jobsRes,
-	})
-}
-
-type pipelinesResponse struct {
-	Pipelines []pipelineResult `json:"pipelines"`
-}
-
-func (h *handler) pipelines(w http.ResponseWriter, r *http.Request) {
-	res := h.pRunner.ListPipelines()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(pipelinesResponse{
-		Pipelines: res,
-	})
-}
-
-type jobLogsResponse struct {
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
-}
-
-func (h *handler) jobLogs(w http.ResponseWriter, r *http.Request) {
-	vars := r.URL.Query()
-	jobIDString := vars.Get("id")
-	jobID, err := uuid.FromString(jobIDString)
-	if err != nil {
-		h.sendError(w, http.StatusBadRequest, "Invalid job id")
-		return
-	}
-	taskName := vars.Get("task")
-	if taskName == "" {
-		h.sendError(w, http.StatusBadRequest, "Invalid task name")
-		return
-	}
-
-	job := h.pRunner.findJob(jobID)
-	if job == nil {
-		h.sendError(w, http.StatusNotFound, "Job not found")
-		return
-	}
-
-	stage := job.graph.Nodes()[taskName]
-	if stage == nil {
-		h.sendError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	var (
-		stdout []byte
-		stderr []byte
-	)
-	stdoutLines, stderrLines, ok := h.pRunner.taskRunner.CurrentTaskOutput(stage.Task)
-	if ok {
-		stdout = bytes.Join(stdoutLines, []byte("\n"))
-		stderr = bytes.Join(stderrLines, []byte("\n"))
-	} else {
-		stdoutReader, err := h.pRunner.outputStore.Reader(job.ID.String(), stage.Task.Name, "stdout")
-		if err != nil {
-			log.
-				WithError(err).
-				Errorf("failed to read output store")
-		} else {
-			stdout, _ = ioutil.ReadAll(stdoutReader)
-			stdoutReader.Close()
-		}
-
-		stderrReader, err := h.pRunner.outputStore.Reader(job.ID.String(), stage.Task.Name, "stderr")
-		if err != nil {
-			log.
-				WithError(err).
-				Errorf("failed to read output store")
-		} else {
-			stderr, _ = ioutil.ReadAll(stderrReader)
-			stderrReader.Close()
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(jobLogsResponse{
-		Stdout: string(stdout),
-		Stderr: string(stderr),
-	})
 }
 
 type taskResult struct {

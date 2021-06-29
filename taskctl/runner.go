@@ -39,13 +39,14 @@ type TaskRunner struct {
 
 	cleanupList sync.Map
 
+	// Added fields to store current task output of running tasks
 	taskOutputsMutex sync.RWMutex
 	taskOutputs      map[*task.Task]*taskOutput
-	outputStore      *OutputStore
+	outputStore      OutputStore
 }
 
 // NewTaskRunner creates new TaskRunner instance
-func NewTaskRunner(outputStore *OutputStore, opts ...Opts) (*TaskRunner, error) {
+func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, error) {
 	r := &TaskRunner{
 		compiler:     runner.NewTaskCompiler(),
 		OutputFormat: output.FormatRaw,
