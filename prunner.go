@@ -99,6 +99,9 @@ func run(c *cli.Context) error {
 		r.Get("/jobs", h.pipelinesJobs)
 		r.Post("/schedule", h.pipelinesSchedule)
 	})
+	r.Route("/job", func(r chi.Router) {
+		r.Get("/logs", h.jobLogs)
+	})
 
 	log.
 		WithField("component", "cli").
@@ -291,6 +294,13 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 		Debugf("Started: scheduled job execution")
 
 	return job, nil
+}
+
+func (r *pipelineRunner) findJob(id uuid.UUID) *pipelineJob {
+	r.mx.RLock()
+	defer r.mx.RUnlock()
+
+	return r.jobsByID[id]
 }
 
 func (r *pipelineRunner) startJob(job *pipelineJob) {
@@ -529,6 +539,75 @@ func (h *handler) pipelines(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type jobLogsResponse struct {
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+}
+
+func (h *handler) jobLogs(w http.ResponseWriter, r *http.Request) {
+	vars := r.URL.Query()
+	jobIDString := vars.Get("id")
+	jobID, err := uuid.FromString(jobIDString)
+	if err != nil {
+		h.sendError(w, http.StatusBadRequest, "Invalid job id")
+		return
+	}
+	taskName := vars.Get("task")
+	if taskName == "" {
+		h.sendError(w, http.StatusBadRequest, "Invalid task name")
+		return
+	}
+
+	job := h.pRunner.findJob(jobID)
+	if job == nil {
+		h.sendError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
+	stage := job.graph.Nodes()[taskName]
+	if stage == nil {
+		h.sendError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	var (
+		stdout []byte
+		stderr []byte
+	)
+	stdoutLines, stderrLines, ok := h.pRunner.taskRunner.CurrentTaskOutput(stage.Task)
+	if ok {
+		stdout = bytes.Join(stdoutLines, []byte("\n"))
+		stderr = bytes.Join(stderrLines, []byte("\n"))
+	} else {
+		stdoutReader, err := h.pRunner.outputStore.Reader(job.ID.String(), stage.Task.Name, "stdout")
+		if err != nil {
+			log.
+				WithError(err).
+				Errorf("failed to read output store")
+		} else {
+			stdout, _ = ioutil.ReadAll(stdoutReader)
+			stdoutReader.Close()
+		}
+
+		stderrReader, err := h.pRunner.outputStore.Reader(job.ID.String(), stage.Task.Name, "stderr")
+		if err != nil {
+			log.
+				WithError(err).
+				Errorf("failed to read output store")
+		} else {
+			stderr, _ = ioutil.ReadAll(stderrReader)
+			stderrReader.Close()
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(jobLogsResponse{
+		Stdout: string(stdout),
+		Stderr: string(stderr),
+	})
+}
+
 type taskResult struct {
 	Name     string    `json:"name"`
 	Status   string    `json:"status"`
@@ -538,8 +617,6 @@ type taskResult struct {
 	ExitCode int16     `json:"exitCode"`
 	Errored  bool      `json:"errored"`
 	Error    *string   `json:"error"`
-	Stdout   string    `json:"stdout"`
-	Stderr   string    `json:"stderr"`
 }
 
 type pipelineJobResult struct {
@@ -574,45 +651,11 @@ func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 
 		t := stage.Task
 		if t != nil {
-
-			// TODO Move to separate endpoint for job output and optimize incremental line fetching
-			var (
-				stdout, stderr []byte
-			)
-			stdoutLines, stderrLines, ok := r.taskRunner.CurrentTaskOutput(t)
-			if ok {
-				stdout = bytes.Join(stdoutLines, []byte("\n"))
-				stderr = bytes.Join(stderrLines, []byte("\n"))
-			} else {
-				// TODO Move to methods for fetching from files
-				stdoutReader, err := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
-				if err != nil {
-					log.
-						WithError(err).
-						Errorf("failed to read output store")
-				} else {
-					stdout, _ = ioutil.ReadAll(stdoutReader)
-					stdoutReader.Close()
-				}
-
-				stderrReader, err := r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
-				if err != nil {
-					log.
-						WithError(err).
-						Errorf("failed to read output store")
-				} else {
-					stderr, _ = ioutil.ReadAll(stderrReader)
-					stderrReader.Close()
-				}
-			}
-
 			res.Start = t.Start
 			res.End = t.End
 			res.Skipped = t.Skipped
 			res.ExitCode = t.ExitCode
 			res.Errored = t.Errored
-			res.Stdout = string(stdout)
-			res.Stderr = string(stderr)
 			if t.Error != nil {
 				s := t.Error.Error()
 				res.Error = &s
