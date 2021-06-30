@@ -10,18 +10,33 @@ import (
 
 	"github.com/apex/log"
 	"github.com/taskctl/taskctl/pkg/task"
+	"networkteam.com/lab/prunner/taskctl"
 )
 
 type mockRunner struct {
-	wg sync.WaitGroup
+	wg           sync.WaitGroup
+	onTaskChange func(t *task.Task)
 }
+
+func (m *mockRunner) OnTaskChange(f func(t *task.Task)) {
+	m.onTaskChange = f
+}
+
+var _ taskctl.Runner = &mockRunner{}
 
 func (m *mockRunner) Run(t *task.Task) error {
 	t.Start = time.Now()
+	if m.onTaskChange != nil {
+		m.onTaskChange(t)
+	}
 
 	log.WithField("component", "mockRunner").Debugf("Running task %s", t.Name)
+	time.Sleep(1*time.Millisecond)
 
 	t.End = time.Now()
+	if m.onTaskChange != nil {
+		m.onTaskChange(t)
+	}
 
 	return nil
 }
@@ -32,19 +47,21 @@ func (m *mockRunner) Cancel() {
 func (m *mockRunner) Finish() {
 }
 
-type mockStore struct {
+type mockOutputStore struct {
 	mx sync.Mutex
 
 	outputs map[string]bytes.Buffer
 }
 
-func newMockStore() *mockStore {
-	return &mockStore{
+var _ taskctl.OutputStore = &mockOutputStore{}
+
+func newMockOutputStore() *mockOutputStore {
+	return &mockOutputStore{
 		outputs: make(map[string]bytes.Buffer),
 	}
 }
 
-func (m *mockStore) Writer(jobID string, taskName string, outputName string) (io.WriteCloser, error) {
+func (m *mockOutputStore) Writer(jobID string, taskName string, outputName string) (io.WriteCloser, error) {
 	m.mx.Lock()
 	buf := m.outputs[fmt.Sprintf("%s-%s.%s", jobID, taskName, outputName)]
 	m.mx.Unlock()
@@ -52,7 +69,7 @@ func (m *mockStore) Writer(jobID string, taskName string, outputName string) (io
 	return &writeCloser{&buf}, nil
 }
 
-func (m *mockStore) Reader(jobID string, taskName string, outputName string) (io.ReadCloser, error) {
+func (m *mockOutputStore) Reader(jobID string, taskName string, outputName string) (io.ReadCloser, error) {
 	m.mx.Lock()
 	buf := m.outputs[fmt.Sprintf("%s-%s.%s", jobID, taskName, outputName)]
 	m.mx.Unlock()

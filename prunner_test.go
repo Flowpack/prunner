@@ -4,17 +4,18 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"networkteam.com/lab/prunner/definition"
 )
 
-func Test_sortTaskNodesTopological(t *testing.T) {
+func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    []taskNode
+		input    jobTasks
 		expected []string
 	}{
 		{
 			name: "no dependencies",
-			input: []taskNode{
+			input: jobTasks{
 				{
 					Name: "zeta",
 				},
@@ -26,10 +27,10 @@ func Test_sortTaskNodesTopological(t *testing.T) {
 		},
 		{
 			name: "simple dep",
-			input: []taskNode{
+			input: jobTasks{
 				{
 					Name:      "b",
-					EdgesFrom: []string{"a"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
 					Name: "a",
@@ -39,14 +40,14 @@ func Test_sortTaskNodesTopological(t *testing.T) {
 		},
 		{
 			name: "chain",
-			input: []taskNode{
+			input: jobTasks{
 				{
 					Name:      "site_export",
-					EdgesFrom: []string{"prepare_directory"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"prepare_directory"}},
 				},
 				{
 					Name:      "build_archive",
-					EdgesFrom: []string{"site_export"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"site_export"}},
 				},
 				{
 					Name: "prepare_directory",
@@ -56,33 +57,33 @@ func Test_sortTaskNodesTopological(t *testing.T) {
 		},
 		{
 			name: "complex dep",
-			input: []taskNode{
+			input: jobTasks{
 				{
 					Name: "a",
 				},
 				{
 					Name:      "b",
-					EdgesFrom: []string{"a", "e"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"a", "e"}},
 				},
 				{
 					Name:      "c",
-					EdgesFrom: []string{"d", "b"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"d", "b"}},
 				},
 				{
 					Name:      "d",
-					EdgesFrom: []string{"a"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
 					Name:      "e",
-					EdgesFrom: []string{"a"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
 					Name:      "f",
-					EdgesFrom: []string{"b", "e"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"b", "e"}},
 				},
 				{
 					Name:      "g",
-					EdgesFrom: []string{"c", "f"},
+					TaskDef: definition.TaskDef{DependsOn: []string{"c", "f"}},
 				},
 			},
 			expected: []string{"a", "d", "e", "b", "c", "f", "g"},
@@ -90,7 +91,7 @@ func Test_sortTaskNodesTopological(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sortTaskNodesTopological(tt.input)
+			tt.input.sortTasksByDependencies()
 
 			var order []string
 			for _, t := range tt.input {

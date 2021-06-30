@@ -40,6 +40,12 @@ func NewApp() *cli.App {
 			EnvVars: []string{"PRUNNER_CONFIG"},
 		},
 		&cli.StringFlag{
+			Name:    "data",
+			Usage:   "Base directory to use for storing data (metadata and job outputs)",
+			Value:   ".prunner",
+			EnvVars: []string{"PRUNNER_DATA"},
+		},
+		&cli.StringFlag{
 			Name:    "pattern",
 			Usage:   "Search pattern (glob) for pipeline configuration scan",
 			Value:   "**/pipelines.{yml,yaml}",

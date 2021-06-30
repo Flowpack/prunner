@@ -15,22 +15,22 @@ type OutputStore interface {
 }
 
 type FileOutputStore struct {
-	basePath string
+	path string
 }
 
-func NewOutputStore(basePath string) (*FileOutputStore, error) {
-	err := os.MkdirAll(path.Join(basePath, "logs"), 0777)
+func NewOutputStore(path string) (*FileOutputStore, error) {
+	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating base directory")
 	}
 
 	return &FileOutputStore{
-		basePath: basePath,
+		path: path,
 	}, nil
 }
 
 func (s *FileOutputStore) Writer(jobID string, taskName string, outputName string) (io.WriteCloser, error) {
-	err := os.MkdirAll(path.Join(s.basePath, "logs", jobID), 0777)
+	err := os.MkdirAll(path.Join(s.path, jobID), 0777)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating job logs directory")
 	}
@@ -53,5 +53,5 @@ func (s *FileOutputStore) Reader(jobID string, taskName string, outputName strin
 }
 
 func (s *FileOutputStore) buildPath(jobID string, taskName string, outputName string) string {
-	return path.Join(s.basePath, "logs", jobID, fmt.Sprintf("%s-%s.log", taskName, outputName))
+	return path.Join(s.path, jobID, fmt.Sprintf("%s-%s.log", taskName, outputName))
 }

@@ -1,6 +1,7 @@
 package prunner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apex/log"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
@@ -54,10 +54,13 @@ var defs = &definition.PipelinesDef{
 func TestServer_Pipelines(t *testing.T) {
 	taskRunner := &mockRunner{}
 
-	pRunner, err := newPipelineRunner(defs, taskRunner)
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockStore()
+	outputStore := newMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
@@ -84,14 +87,15 @@ func TestServer_Pipelines(t *testing.T) {
 }
 
 func TestServer_PipelinesSchedule(t *testing.T) {
-	log.SetLevel(log.DebugLevel)
-
 	taskRunner := &mockRunner{}
 
-	pRunner, err := newPipelineRunner(defs, taskRunner)
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockStore()
+	outputStore := newMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
@@ -126,4 +130,3 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 		return j != nil && j.Completed
 	}, 50*time.Millisecond, "job exists and is completed")
 }
-

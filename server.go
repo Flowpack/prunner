@@ -147,8 +147,7 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stage := job.graph.Nodes()[taskName]
-	if stage == nil {
+	if task := job.Tasks.byName(taskName); task == nil {
 		h.sendError(w, http.StatusNotFound, "Task not found")
 		return
 	}
@@ -157,7 +156,7 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stdout []byte
 		stderr []byte
 	)
-	stdoutReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stdout")
+	stdoutReader, err := h.outputStore.Reader(job.ID.String(), taskName, "stdout")
 	if err != nil {
 		log.
 			WithError(err).
@@ -167,7 +166,7 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stdoutReader.Close()
 	}
 
-	stderrReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stderr")
+	stderrReader, err := h.outputStore.Reader(job.ID.String(), taskName, "stderr")
 	if err != nil {
 		log.
 			WithError(err).

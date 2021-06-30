@@ -19,6 +19,11 @@ import (
 	"github.com/taskctl/taskctl/pkg/variables"
 )
 
+type Runner interface {
+	runner.Runner
+	OnTaskChange(func(t *task.Task))
+}
+
 // TaskRunner run tasks
 type TaskRunner struct {
 	contexts  map[string]*runner.ExecutionContext
@@ -39,8 +44,13 @@ type TaskRunner struct {
 
 	cleanupList sync.Map
 
-	outputStore      OutputStore
+	// Additional output store to store task outputs
+	outputStore OutputStore
+
+	onTaskChange func(t *task.Task)
 }
+
+var _ Runner = &TaskRunner{}
 
 // NewTaskRunner creates new TaskRunner instance
 func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, error) {
@@ -66,6 +76,10 @@ func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, err
 	r.env = variables.FromMap(map[string]string{"ARGS": r.variables.Get("Args").(string)})
 
 	return r, nil
+}
+
+func (r *TaskRunner) OnTaskChange(f func(t *task.Task)) {
+	r.onTaskChange = f
 }
 
 // SetContexts sets task runner's contexts
@@ -355,6 +369,8 @@ func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Jo
 	}
 
 	t.Start = time.Now()
+	r.notifyTaskChange(t)
+
 	var prevOutput []byte
 	for nextJob := job; nextJob != nil; nextJob = nextJob.Next {
 		var err error
@@ -362,22 +378,30 @@ func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Jo
 
 		prevOutput, err = exec.Execute(ctx, nextJob)
 		if err != nil {
-			logrus.Debug(err.Error())
+			t.End = time.Now()
 			if status, ok := executor.IsExitStatus(err); ok {
 				t.ExitCode = int16(status)
 				if t.AllowFailure {
+					r.notifyTaskChange(t)
 					continue
 				}
 			}
 			t.Errored = true
 			t.Error = err
-			t.End = time.Now()
+			r.notifyTaskChange(t)
 			return t.Error
 		}
 	}
 	t.End = time.Now()
+	r.notifyTaskChange(t)
 
 	return nil
+}
+
+func (r *TaskRunner) notifyTaskChange(t *task.Task) {
+	if r.onTaskChange != nil {
+		r.onTaskChange(t)
+	}
 }
 
 // Opts is a task runner configuration function.

@@ -1,9 +1,11 @@
 package prunner
 
 import (
-	"fmt"
+	"context"
+	stderrors "errors"
 	"io"
 	"net/http"
+	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -70,10 +72,12 @@ func run(c *cli.Context) error {
 
 	// TODO Reload pipelines on file changes
 
-	outputStore, err := taskctl.NewOutputStore(".prunner")
+	outputStore, err := taskctl.NewOutputStore(path.Join(c.String("data"), "logs"))
 	if err != nil {
 		return errors.Wrap(err, "building output store")
 	}
+
+	// TODO For correct cancellation of tasks a single task runner and scheduler should be used when executing pipelines
 
 	taskRunner, err := taskctl.NewTaskRunner(outputStore)
 	if err != nil {
@@ -82,8 +86,13 @@ func run(c *cli.Context) error {
 	taskRunner.Stdout = io.Discard
 	taskRunner.Stderr = io.Discard
 
+	store, err := newJSONDataStore(path.Join(c.String("data")))
+	if err != nil {
+		return errors.Wrap(err, "building pipeline runner store")
+	}
+
 	// Set up pipeline runner
-	pRunner, err := newPipelineRunner(defs, taskRunner)
+	pRunner, err := newPipelineRunner(c.Context, defs, taskRunner, store)
 	if err != nil {
 		return err
 	}
@@ -103,27 +112,57 @@ func run(c *cli.Context) error {
 	return http.ListenAndServe(c.String("address"), srv)
 }
 
-func newPipelineRunner(defs *definition.PipelinesDef, taskRunner runner.Runner) (*pipelineRunner, error) {
-	sched := scheduler.NewScheduler(taskRunner)
+func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskRunner taskctl.Runner, store dataStore) (*pipelineRunner, error) {
+	sched := taskctl.NewScheduler(taskRunner)
 
-	return &pipelineRunner{
+	pRunner := &pipelineRunner{
 		defs:               defs,
 		sched:              sched,
 		taskRunner:         taskRunner,
 		jobsByID:           make(map[uuid.UUID]*pipelineJob),
 		jobsByPipeline:     make(map[string][]*pipelineJob),
 		waitListByPipeline: make(map[string][]*pipelineJob),
-	}, nil
+		store:              store,
+		persistRequests:    make(chan struct{}, 1),
+	}
+
+	// Listen on task changes
+	taskRunner.OnTaskChange(pRunner.handleTaskChange)
+	sched.OnStageChange(pRunner.handleStageChange)
+
+	if store != nil {
+		err := pRunner.initialLoadFromStore()
+		if err != nil {
+			return nil, errors.Wrap(err, "loading from store")
+		}
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-pRunner.persistRequests:
+					pRunner.saveToStore()
+				}
+			}
+		}()
+	}
+
+	return pRunner, nil
 }
 
 type pipelineRunner struct {
-	sched              *scheduler.Scheduler
+	sched              *taskctl.Scheduler
 	taskRunner         runner.Runner
 	defs               *definition.PipelinesDef
 	jobsByID           map[uuid.UUID]*pipelineJob
 	jobsByPipeline     map[string][]*pipelineJob
 	waitListByPipeline map[string][]*pipelineJob
+	store              dataStore
 
+	persistRequests chan struct{}
+
+	// Mutex for reading or writing jobs and job state
 	mx sync.RWMutex
 }
 
@@ -139,30 +178,29 @@ type pipelineJob struct {
 	// End is the actual end time of the job (can be nil if incomplete)
 	End  *time.Time
 	User string
-
-	graph *scheduler.ExecutionGraph
-	// order of tasks sorted 1. by topology (rank in DAG) and 2. by name ascending
-	taskOrder map[string]int
+	// Tasks is an in-memory representation with state of tasks, sorted by dependencies
+	Tasks     jobTasks
+	LastError error
 }
 
-func (j *pipelineJob) calculateTaskOrder() {
-	var nodes []taskNode
-	for _, stage := range j.graph.Nodes() {
-		nodes = append(nodes, taskNode{
-			Name:      stage.Name,
-			EdgesFrom: stage.DependsOn,
-		})
-	}
-
-	sortTaskNodesTopological(nodes)
-
-	taskOrder := make(map[string]int)
-	for i, v := range nodes {
-		taskOrder[v.Name] = i
-	}
-
-	j.taskOrder = taskOrder
+func (j *pipelineJob) isRunning() bool {
+	return j.Start != nil && !j.Completed && !j.Canceled
 }
+
+type jobTask struct {
+	definition.TaskDef
+	Name string
+
+	Status   string
+	Start    *time.Time
+	End      *time.Time
+	Skipped  bool
+	ExitCode int16
+	Errored  bool
+	Error    error
+}
+
+type jobTasks []jobTask
 
 type scheduleAction int
 
@@ -195,45 +233,20 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 		return nil, errQueueFull
 	}
 
-	var stages []*scheduler.Stage
-
 	id, err := uuid.NewV4()
 	if err != nil {
 		return nil, errors.Wrap(err, "generating job UUID")
 	}
 
-	for taskName, taskDef := range pipelineDef.Tasks {
-		t := task.FromCommands(taskDef.Script...)
-		t.Name = taskName
-		t.AllowFailure = taskDef.AllowFailure
-
-		s := &scheduler.Stage{
-			Name:         taskName,
-			Task:         t,
-			DependsOn:    taskDef.DependsOn,
-			AllowFailure: taskDef.AllowFailure,
-			Variables: variables.FromMap(map[string]string{
-				// Inject job id for later use in the task runner
-				"jobID": id.String(),
-			}),
-		}
-
-		stages = append(stages, s)
-	}
-
-	g, err := scheduler.NewExecutionGraph(stages...)
-	if err != nil {
-		return nil, errors.Wrap(err, "building execution graph")
-	}
+	defer r.requestPersist()
 
 	job := &pipelineJob{
 		ID:       id,
 		Pipeline: pipeline,
 		Created:  time.Now(),
 		User:     opts.User,
-		graph:    g,
+		Tasks:    buildJobTasks(pipelineDef.Tasks),
 	}
-	job.calculateTaskOrder()
 
 	r.jobsByID[id] = job
 	r.jobsByPipeline[pipeline] = append(r.jobsByPipeline[pipeline], job)
@@ -277,6 +290,51 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 	return job, nil
 }
 
+func buildJobTasks(tasks map[string]definition.TaskDef) (result jobTasks) {
+	result = make(jobTasks, 0, len(tasks))
+
+	for taskName, taskDef := range tasks {
+		result = append(result, jobTask{
+			TaskDef: taskDef,
+			Name:    taskName,
+			Status:  toStatus(scheduler.StatusWaiting),
+		})
+	}
+
+	result.sortTasksByDependencies()
+
+	return result
+}
+
+func buildPipelineGraph(id uuid.UUID, tasks jobTasks) (*scheduler.ExecutionGraph, error) {
+	var stages []*scheduler.Stage
+	for _, taskDef := range tasks {
+		t := task.FromCommands(taskDef.Script...)
+		t.Name = taskDef.Name
+		t.AllowFailure = taskDef.AllowFailure
+
+		s := &scheduler.Stage{
+			Name:         taskDef.Name,
+			Task:         t,
+			DependsOn:    taskDef.DependsOn,
+			AllowFailure: taskDef.AllowFailure,
+			Variables: variables.FromMap(map[string]string{
+				// Inject job id for later use in the task runner
+				"jobID": id.String(),
+			}),
+		}
+
+		stages = append(stages, s)
+	}
+
+	g, err := scheduler.NewExecutionGraph(stages...)
+	if err != nil {
+		return nil, errors.Wrap(err, "building execution graph")
+	}
+
+	return g, nil
+}
+
 func (r *pipelineRunner) findJob(id uuid.UUID) *pipelineJob {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
@@ -285,18 +343,84 @@ func (r *pipelineRunner) findJob(id uuid.UUID) *pipelineJob {
 }
 
 func (r *pipelineRunner) startJob(job *pipelineJob) {
+	graph, err := buildPipelineGraph(job.ID, job.Tasks)
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.ID)
+
+		job.LastError = err
+		job.Canceled = true
+
+		// A job was canceled, so there might be room for other jobs to start
+		r.startJobsOnWaitList(job.Pipeline)
+
+		return
+	}
+
 	// Actually start job
 	now := time.Now()
 	job.Start = &now
 
 	// Run graph asynchronously
 	go func() {
-		_ = r.sched.Schedule(job.graph)
-		r.jobCompleted(job.ID)
+		lastErr := r.sched.Schedule(graph)
+		r.jobCompleted(job.ID, lastErr)
 	}()
 }
 
-func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
+// handleTaskChange will be called when the task state changes in the task runner
+func (r *pipelineRunner) handleTaskChange(t *task.Task) {
+	r.mx.Lock()
+	defer r.mx.Unlock()
+
+	jobIDString := t.Variables.Get("jobID").(string)
+	jobID, _ := uuid.FromString(jobIDString)
+	j, ok := r.jobsByID[jobID]
+	if !ok {
+		return
+	}
+
+	jt := j.Tasks.byName(t.Name)
+	if jt == nil {
+		return
+	}
+	if !t.Start.IsZero() {
+		start := t.Start
+		jt.Start = &start
+	}
+	if !t.End.IsZero() {
+		end := t.End
+		jt.End = &end
+	}
+	jt.Errored = t.Errored
+	jt.Error = t.Error
+	jt.ExitCode = t.ExitCode
+	jt.Skipped = t.Skipped
+}
+
+// handleStageChange will be called when the stage state changes in the scheduler
+func (r *pipelineRunner) handleStageChange(stage *scheduler.Stage) {
+	r.mx.Lock()
+	defer r.mx.Unlock()
+
+	jobIDString := stage.Variables.Get("jobID").(string)
+	jobID, _ := uuid.FromString(jobIDString)
+	j, ok := r.jobsByID[jobID]
+	if !ok {
+		return
+	}
+
+	jt := j.Tasks.byName(stage.Name)
+	if jt == nil {
+		return
+	}
+
+	jt.Status = toStatus(stage.ReadStatus())
+}
+
+func (r *pipelineRunner) jobCompleted(id uuid.UUID, err error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -304,20 +428,31 @@ func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
 	if job == nil {
 		return
 	}
+
 	job.Completed = true
 	now := time.Now()
 	job.End = &now
+	job.LastError = err
 
+	pipeline := job.Pipeline
 	log.
 		WithField("component", "runner").
 		WithField("jobID", id).
-		WithField("pipeline", job.Pipeline).
+		WithField("pipeline", pipeline).
 		Debug("Job completed")
 
+	// A job finished, so there might be room to start other jobs on the wait list
+	r.startJobsOnWaitList(pipeline)
+
+	r.requestPersist()
+}
+
+func (r *pipelineRunner) startJobsOnWaitList(pipeline string) {
 	// Check wait list if another job is queued
-	waitList := r.waitListByPipeline[job.Pipeline]
+	waitList := r.waitListByPipeline[pipeline]
+
 	// Schedule as many jobs as are schedulable
-	for len(waitList) > 0 && r.resolveScheduleAction(job.Pipeline) == scheduleActionStart {
+	for len(waitList) > 0 && r.resolveScheduleAction(pipeline) == scheduleActionStart {
 		queuedJob := waitList[0]
 		waitList = waitList[1:]
 
@@ -329,9 +464,7 @@ func (r *pipelineRunner) jobCompleted(id uuid.UUID) {
 			WithField("jobID", queuedJob.ID).
 			Debugf("Dequeue: scheduled job execution")
 	}
-	r.waitListByPipeline[job.Pipeline] = waitList
-
-	// TODO Persist job results and remove from in-memory map
+	r.waitListByPipeline[pipeline] = waitList
 }
 
 func (r *pipelineRunner) ListJobs() []pipelineJobResult {
@@ -377,7 +510,7 @@ func (r *pipelineRunner) ListPipelines() []pipelineResult {
 
 func (r *pipelineRunner) isRunning(pipeline string) bool {
 	for _, job := range r.jobsByPipeline[pipeline] {
-		if !job.Completed {
+		if job.isRunning() {
 			return true
 		}
 	}
@@ -387,7 +520,7 @@ func (r *pipelineRunner) isRunning(pipeline string) bool {
 func (r *pipelineRunner) runningJobsCount(pipeline string) int {
 	running := 0
 	for _, job := range r.jobsByPipeline[pipeline] {
-		if job.Start != nil && !job.Completed {
+		if job.isRunning() {
 			running++
 		}
 	}
@@ -398,7 +531,6 @@ func (r *pipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	pipelineDef := r.defs.Pipelines[pipeline]
 
 	runningJobsCount := r.runningJobsCount(pipeline)
-	fmt.Println("Running jobs count", pipeline, runningJobsCount)
 	if runningJobsCount >= pipelineDef.Concurrency {
 		// Check if jobs should be queued if concurrency factor is exceeded
 		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
@@ -440,14 +572,14 @@ type ScheduleOpts struct {
 }
 
 type taskResult struct {
-	Name     string    `json:"name"`
-	Status   string    `json:"status"`
-	Start    time.Time `json:"start"`
-	End      time.Time `json:"end"`
-	Skipped  bool      `json:"skipped"`
-	ExitCode int16     `json:"exitCode"`
-	Errored  bool      `json:"errored"`
-	Error    *string   `json:"error"`
+	Name     string     `json:"name"`
+	Status   string     `json:"status"`
+	Start    *time.Time `json:"start"`
+	End      *time.Time `json:"end"`
+	Skipped  bool       `json:"skipped"`
+	ExitCode int16      `json:"exitCode"`
+	Errored  bool       `json:"errored"`
+	Error    *string    `json:"error"`
 }
 
 type pipelineJobResult struct {
@@ -461,6 +593,7 @@ type pipelineJobResult struct {
 	Start     *time.Time   `json:"start"`
 	End       *time.Time   `json:"end"`
 	User      string       `json:"user"`
+	LastError *string      `json:"lastError"`
 }
 
 type pipelineResult struct {
@@ -472,32 +605,23 @@ type pipelineResult struct {
 func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 	var taskResults []taskResult
 
-	for _, stage := range j.graph.Nodes() {
+	errored := false
+	for _, t := range j.Tasks {
 		res := taskResult{
-			Name:   stage.Name,
-			Status: toStatus(stage.ReadStatus()),
-			Start:  stage.Start,
-			End:    stage.End,
-		}
-
-		t := stage.Task
-		if t != nil {
-			res.Start = t.Start
-			res.End = t.End
-			res.Skipped = t.Skipped
-			res.ExitCode = t.ExitCode
-			res.Errored = t.Errored
-			if t.Error != nil {
-				s := t.Error.Error()
-				res.Error = &s
-			}
+			Name:     t.Name,
+			Status:   t.Status,
+			Start:    t.Start,
+			End:      t.End,
+			Skipped:  t.Skipped,
+			ExitCode: t.ExitCode,
+			Errored:  t.Errored,
+			Error:    errToStrPtr(t.Error),
 		}
 		taskResults = append(taskResults, res)
+		// Collect if pipelines had a errored task
+		// TODO Check if this works if AllowFailure is true!
+		errored = errored || t.Errored
 	}
-
-	sort.Slice(taskResults, func(x, y int) bool {
-		return j.taskOrder[taskResults[x].Name] < j.taskOrder[taskResults[y].Name]
-	})
 
 	return pipelineJobResult{
 		Tasks:     taskResults,
@@ -505,20 +629,175 @@ func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 		Pipeline:  j.Pipeline,
 		Completed: j.Completed,
 		Canceled:  j.Canceled,
-		Errored:   j.graph.LastError() != nil,
+		Errored:   errored,
 		Created:   j.Created,
 		Start:     j.Start,
 		End:       j.End,
 		User:      j.User,
+		LastError: errToStrPtr(j.LastError),
 	}
 }
 
-type taskNode struct {
-	Name      string
-	EdgesFrom []string
+func (r *pipelineRunner) initialLoadFromStore() error {
+	log.
+		WithField("component", "runner").
+		Debug("Loading state from store")
+
+	r.mx.Lock()
+	defer r.mx.Unlock()
+
+	data, err := r.store.Load()
+	if err != nil {
+		return errors.Wrap(err, "loading data")
+	}
+
+	for _, pJob := range data.Jobs {
+		job := buildJobFromPersistedJob(pJob)
+
+		// Cancel job with tasks if it appears to be still running (which it cannot if we initialize from the store)
+		if job.isRunning() {
+			for i := range job.Tasks {
+				jt := &job.Tasks[i]
+				if jt.Status == "waiting" || jt.Status == "running" {
+					jt.Status = "canceled"
+				}
+			}
+
+			// TODO Maybe add a new "Incomplete" flag?
+			job.Canceled = true
+
+			log.
+				WithField("component", "runner").
+				WithField("jobID", job.ID).
+				WithField("pipeline", job.Pipeline).
+				Warnf("Found running job when restoring state, marked as canceled")
+		}
+
+		r.jobsByID[pJob.ID] = job
+		r.jobsByPipeline[pJob.Pipeline] = append(r.jobsByPipeline[pJob.Pipeline], job)
+	}
+
+	for pipeline, waitList := range data.WaitLists {
+		for _, jobID := range waitList {
+			job := r.jobsByID[jobID]
+			if job == nil {
+				log.Errorf("Job %s on wait list for pipeline %s was not defined", jobID, pipeline)
+				continue
+			}
+
+			r.waitListByPipeline[pipeline] = append(r.waitListByPipeline[pipeline], job)
+		}
+
+		r.startJobsOnWaitList(pipeline)
+	}
+
+	return nil
 }
 
-func sortTaskNodesTopological(nodes []taskNode) {
+func (r *pipelineRunner) saveToStore() {
+	log.
+		WithField("component", "runner").
+		Debugf("Saving job state to data store")
+
+	r.mx.RLock()
+	data := &persistedData{
+		Jobs:      make([]persistedJob, 0, len(r.jobsByID)),
+		WaitLists: make(map[string][]uuid.UUID),
+	}
+	for _, job := range r.jobsByID {
+		tasks := make([]persistedTask, len(job.Tasks))
+		for i, t := range job.Tasks {
+			tasks[i] = persistedTask{
+				Name:         t.Name,
+				Script:       t.Script,
+				DependsOn:    t.DependsOn,
+				AllowFailure: t.AllowFailure,
+				Status:       t.Status,
+				Start:        t.Start,
+				End:          t.End,
+				Skipped:      t.Skipped,
+				ExitCode:     t.ExitCode,
+				Errored:      t.Errored,
+				Error:        errToStrPtr(t.Error),
+			}
+		}
+
+		data.Jobs = append(data.Jobs, persistedJob{
+			ID:        job.ID,
+			Pipeline:  job.Pipeline,
+			Completed: job.Completed,
+			Canceled:  job.Canceled,
+			Created:   job.Created,
+			Start:     job.Start,
+			End:       job.End,
+			User:      job.User,
+			Tasks:     tasks,
+		})
+	}
+	for pipeline, jobs := range r.waitListByPipeline {
+		waitList := make([]uuid.UUID, len(jobs))
+		for i, job := range jobs {
+			waitList[i] = job.ID
+		}
+		data.WaitLists[pipeline] = waitList
+	}
+	r.mx.RUnlock()
+
+	// We do not need to lock here, the single save loops guarantees non-concurrent saves
+
+	err := r.store.Save(data)
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithError(err).
+			Errorf("Error saving job state to data store")
+	}
+}
+
+func (r *pipelineRunner) requestPersist() {
+	// Debounce persist requests by not persisting if the persist channel is already full (buffered with length 1)
+	select {
+	case r.persistRequests <- struct{}{}:
+	default:
+	}
+}
+
+func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
+	job := &pipelineJob{
+		ID:        pJob.ID,
+		Pipeline:  pJob.Pipeline,
+		Completed: pJob.Completed,
+		Canceled:  pJob.Canceled,
+		Created:   pJob.Created,
+		Start:     pJob.Start,
+		End:       pJob.End,
+		User:      pJob.User,
+	}
+
+	tasks := make(jobTasks, len(pJob.Tasks))
+	for i, pJobTask := range pJob.Tasks {
+		tasks[i] = jobTask{
+			Name: pJobTask.Name,
+			TaskDef: definition.TaskDef{
+				Script:       pJobTask.Script,
+				DependsOn:    pJobTask.DependsOn,
+				AllowFailure: pJobTask.AllowFailure,
+			},
+			Status:   pJobTask.Status,
+			Start:    pJobTask.Start,
+			End:      pJobTask.End,
+			Skipped:  pJobTask.Skipped,
+			ExitCode: pJobTask.ExitCode,
+			Errored:  pJobTask.Errored,
+			Error:    strPtrToErr(pJobTask.Error),
+		}
+	}
+	job.Tasks = tasks
+
+	return job
+}
+
+func (jt jobTasks) sortTasksByDependencies() {
 	// Apply topological sorting (see https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm)
 
 	var queue []string
@@ -532,9 +811,9 @@ func sortTaskNodesTopological(nodes []taskNode) {
 	tmpNodes := make(map[string]*tmpNode)
 
 	// Build temporary graph
-	for _, n := range nodes {
+	for _, n := range jt {
 		inc := make(map[string]struct{})
-		for _, from := range n.EdgesFrom {
+		for _, from := range n.DependsOn {
 			inc[from] = struct{}{}
 		}
 		tmpNodes[n.Name] = &tmpNode{
@@ -568,15 +847,25 @@ func sortTaskNodesTopological(nodes []taskNode) {
 		sort.Strings(queue)
 	}
 
-	sort.Slice(nodes, func(i, j int) bool {
-		ri := tmpNodes[nodes[i].Name].order
-		rj := tmpNodes[nodes[j].Name].order
+	sort.Slice(jt, func(i, j int) bool {
+		ri := tmpNodes[jt[i].Name].order
+		rj := tmpNodes[jt[j].Name].order
 		// For same rank order by name
 		if ri == rj {
-			return nodes[i].Name < nodes[j].Name
+			return jt[i].Name < jt[j].Name
 		}
+		// Otherwise order by rank
 		return ri < rj
 	})
+}
+
+func (jt jobTasks) byName(name string) *jobTask {
+	for i := range jt {
+		if jt[i].Name == name {
+			return &jt[i]
+		}
+	}
+	return nil
 }
 
 func toStatus(status int32) string {
@@ -595,4 +884,19 @@ func toStatus(status int32) string {
 		return "canceled"
 	}
 	return ""
+}
+
+func errToStrPtr(err error) *string {
+	if err != nil {
+		s := err.Error()
+		return &s
+	}
+	return nil
+}
+
+func strPtrToErr(s *string) error {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return stderrors.New(*s)
 }
