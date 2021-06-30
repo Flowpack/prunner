@@ -1,7 +1,6 @@
 package prunner
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -71,7 +70,7 @@ func (h *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 
 	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
 	if err != nil {
-		// TODO Send JSON error and include expected errors
+		// TODO Send JSON error and include expected errors (see resolveScheduleAction)
 
 		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
 		return
@@ -158,30 +157,24 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stdout []byte
 		stderr []byte
 	)
-	stdoutLines, stderrLines, ok := h.pRunner.taskRunner.CurrentTaskOutput(stage.Task)
-	if ok {
-		stdout = bytes.Join(stdoutLines, []byte("\n"))
-		stderr = bytes.Join(stderrLines, []byte("\n"))
+	stdoutReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stdout")
+	if err != nil {
+		log.
+			WithError(err).
+			Errorf("failed to read output store")
 	} else {
-		stdoutReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stdout")
-		if err != nil {
-			log.
-				WithError(err).
-				Errorf("failed to read output store")
-		} else {
-			stdout, _ = ioutil.ReadAll(stdoutReader)
-			stdoutReader.Close()
-		}
+		stdout, _ = ioutil.ReadAll(stdoutReader)
+		stdoutReader.Close()
+	}
 
-		stderrReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stderr")
-		if err != nil {
-			log.
-				WithError(err).
-				Errorf("failed to read output store")
-		} else {
-			stderr, _ = ioutil.ReadAll(stderrReader)
-			stderrReader.Close()
-		}
+	stderrReader, err := h.outputStore.Reader(job.ID.String(), stage.Task.Name, "stderr")
+	if err != nil {
+		log.
+			WithError(err).
+			Errorf("failed to read output store")
+	} else {
+		stderr, _ = ioutil.ReadAll(stderrReader)
+		stderrReader.Close()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

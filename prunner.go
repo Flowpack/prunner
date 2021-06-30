@@ -1,6 +1,7 @@
 package prunner
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -397,6 +398,7 @@ func (r *pipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	pipelineDef := r.defs.Pipelines[pipeline]
 
 	runningJobsCount := r.runningJobsCount(pipeline)
+	fmt.Println("Running jobs count", pipeline, runningJobsCount)
 	if runningJobsCount >= pipelineDef.Concurrency {
 		// Check if jobs should be queued if concurrency factor is exceeded
 		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {

@@ -39,9 +39,6 @@ type TaskRunner struct {
 
 	cleanupList sync.Map
 
-	// Added fields to store current task output of running tasks
-	taskOutputsMutex sync.RWMutex
-	taskOutputs      map[*task.Task]*taskOutput
 	outputStore      OutputStore
 }
 
@@ -57,7 +54,6 @@ func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, err
 		env:          variables.NewVariables(),
 		doneCh:       make(chan struct{}, 1),
 
-		taskOutputs: make(map[*task.Task]*taskOutput),
 		outputStore: outputStore,
 	}
 
@@ -144,22 +140,6 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		return err
 	}
 
-	// Modification: add a temporary task output while the task is running
-	r.taskOutputsMutex.Lock()
-	out := newTaskOutput()
-	r.taskOutputs[t] = out
-	r.taskOutputsMutex.Unlock()
-
-	defer func() {
-		r.taskOutputsMutex.Lock()
-		// Flush task outputs
-		r.taskOutputs[t].stdout.Finish()
-		r.taskOutputs[t].stderr.Finish()
-		// Remove task output after finishing task
-		delete(r.taskOutputs, t)
-		r.taskOutputsMutex.Unlock()
-	}()
-
 	jobID := t.Variables.Get("jobID").(string)
 
 	stdoutStorer, err := r.outputStore.Writer(jobID, t.Name, "stdout")
@@ -183,12 +163,10 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		execContext,
 		stdin,
 		io.MultiWriter(
-			out.stdout,
 			&t.Log.Stdout,
 			stdoutStorer,
 		),
 		io.MultiWriter(
-			out.stderr,
 			&t.Log.Stderr,
 			stderrStorer,
 		),
@@ -206,30 +184,6 @@ func (r *TaskRunner) Run(t *task.Task) error {
 	r.storeTaskOutput(t)
 
 	return r.after(r.ctx, t, env, vars)
-}
-
-type taskOutput struct {
-	stdout *LineWriter
-	stderr *LineWriter
-}
-
-func newTaskOutput() *taskOutput {
-	return &taskOutput{
-		stdout: &LineWriter{},
-		stderr: &LineWriter{},
-	}
-}
-
-func (r *TaskRunner) CurrentTaskOutput(t *task.Task) (stdout [][]byte, stderr [][]byte, ok bool) {
-	r.taskOutputsMutex.RLock()
-	defer r.taskOutputsMutex.RUnlock()
-
-	out, ok := r.taskOutputs[t]
-	if !ok {
-		return nil, nil, false
-	}
-
-	return out.stdout.Lines(), out.stderr.Lines(), true
 }
 
 // Cancel cancels execution
