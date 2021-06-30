@@ -123,7 +123,8 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 		jobsByPipeline:     make(map[string][]*pipelineJob),
 		waitListByPipeline: make(map[string][]*pipelineJob),
 		store:              store,
-		persistRequests:    make(chan struct{}, 1),
+		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
+		persistRequests: make(chan struct{}, 1),
 	}
 
 	// Listen on task changes
@@ -143,6 +144,8 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 					return
 				case <-pRunner.persistRequests:
 					pRunner.saveToStore()
+					// Perform save at most every 3 seconds
+					time.Sleep(3 * time.Second)
 				}
 			}
 		}()
@@ -343,6 +346,8 @@ func (r *pipelineRunner) findJob(id uuid.UUID) *pipelineJob {
 }
 
 func (r *pipelineRunner) startJob(job *pipelineJob) {
+	defer r.requestPersist()
+
 	graph, err := buildPipelineGraph(job.ID, job.Tasks)
 	if err != nil {
 		log.
@@ -398,6 +403,8 @@ func (r *pipelineRunner) handleTaskChange(t *task.Task) {
 	jt.Error = t.Error
 	jt.ExitCode = t.ExitCode
 	jt.Skipped = t.Skipped
+
+	r.requestPersist()
 }
 
 // handleStageChange will be called when the stage state changes in the scheduler
@@ -418,6 +425,8 @@ func (r *pipelineRunner) handleStageChange(stage *scheduler.Stage) {
 	}
 
 	jt.Status = toStatus(stage.ReadStatus())
+
+	r.requestPersist()
 }
 
 func (r *pipelineRunner) jobCompleted(id uuid.UUID, err error) {
@@ -755,9 +764,10 @@ func (r *pipelineRunner) saveToStore() {
 }
 
 func (r *pipelineRunner) requestPersist() {
-	// Debounce persist requests by not persisting if the persist channel is already full (buffered with length 1)
+	// Debounce persist requests by not sending if the persist channel is already full (buffered with length 1)
 	select {
 	case r.persistRequests <- struct{}{}:
+		// The default case prevents blocking when sending to a full channel
 	default:
 	}
 }
