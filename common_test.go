@@ -14,7 +14,6 @@ import (
 )
 
 type mockRunner struct {
-	wg           sync.WaitGroup
 	onTaskChange func(t *task.Task)
 }
 
@@ -31,7 +30,7 @@ func (m *mockRunner) Run(t *task.Task) error {
 	}
 
 	log.WithField("component", "mockRunner").Debugf("Running task %s", t.Name)
-	time.Sleep(1*time.Millisecond)
+	time.Sleep(1 * time.Millisecond)
 
 	t.End = time.Now()
 	if m.onTaskChange != nil {
