@@ -2,3 +2,5 @@ tmp
 bin
 .prunner.yml
 .prunner
+
+dist/
