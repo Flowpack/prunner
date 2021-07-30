@@ -48,6 +48,12 @@ pipelines:
           - go build -o bin/prunner .
         depends_on: [lint, test, do_something_long]
 
+  give_me_variables:
+    tasks:
+      hello:
+        script:
+          - echo "Hello {{.name}}"
+
   test_it:
     tasks:
       lint:

@@ -24,10 +24,6 @@ import (
 	"networkteam.com/lab/prunner/taskctl"
 )
 
-type scheduleInput struct {
-	Pipeline string
-}
-
 func newDebugCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "debug",
@@ -123,9 +119,9 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 		sched:      sched,
 		taskRunner: taskRunner,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
-		jobsByID:           make(map[uuid.UUID]*pipelineJob),
+		jobsByID: make(map[uuid.UUID]*pipelineJob),
 		// jobsByPipeline contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
-		jobsByPipeline:     make(map[string][]*pipelineJob),
+		jobsByPipeline: make(map[string][]*pipelineJob),
 		// waitListByPipeline additionally contains all the jobs currently waiting, but not yet started (because concurrency limits have been reached)
 		waitListByPipeline: make(map[string][]*pipelineJob),
 		store:              store,
@@ -186,6 +182,8 @@ type pipelineRunner struct {
 type pipelineJob struct {
 	ID        uuid.UUID
 	Pipeline  string
+	Variables map[string]interface{}
+
 	Completed bool
 	Canceled  bool
 	// Created is the schedule / queue time of the job
@@ -259,11 +257,12 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 	defer r.requestPersist()
 
 	job := &pipelineJob{
-		ID:       id,
-		Pipeline: pipeline,
-		Created:  time.Now(),
-		User:     opts.User,
-		Tasks:    buildJobTasks(pipelineDef.Tasks),
+		ID:        id,
+		Pipeline:  pipeline,
+		Created:   time.Now(),
+		Tasks:     buildJobTasks(pipelineDef.Tasks),
+		Variables: opts.Variables,
+		User:      opts.User,
 	}
 
 	r.jobsByID[id] = job
@@ -277,6 +276,7 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 			WithField("component", "runner").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
+			WithField("variables", job.Variables).
 			Debugf("Queued: added job to wait list")
 
 		return job, nil
@@ -290,6 +290,7 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 			WithField("component", "runner").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
+			WithField("variables", job.Variables).
 			Debugf("Queued: replaced job on wait list")
 
 		return job, nil
@@ -303,6 +304,7 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 		WithField("component", "runner").
 		WithField("pipeline", job.Pipeline).
 		WithField("jobID", job.ID).
+		WithField("variables", job.Variables).
 		Debugf("Started: scheduled job execution")
 
 	return job, nil
@@ -324,22 +326,32 @@ func buildJobTasks(tasks map[string]definition.TaskDef) (result jobTasks) {
 	return result
 }
 
-func buildPipelineGraph(id uuid.UUID, tasks jobTasks) (*scheduler.ExecutionGraph, error) {
+func buildPipelineGraph(id uuid.UUID, tasks jobTasks, vars map[string]interface{}) (*scheduler.ExecutionGraph, error) {
 	var stages []*scheduler.Stage
 	for _, taskDef := range tasks {
 		t := task.FromCommands(taskDef.Script...)
 		t.Name = taskDef.Name
 		t.AllowFailure = taskDef.AllowFailure
 
+		taskVariables := variables.FromMap(map[string]string{
+			// Inject job id for later use in the task runner (see HandleStageChange and HandleTaskChange)
+			taskctl.JobIDVariableName: id.String(),
+		})
+
+		for name, value := range vars {
+			if name == taskctl.JobIDVariableName {
+				return nil, errors.Errorf("variable name %s is reserved for internal use", taskctl.JobIDVariableName)
+			}
+
+			taskVariables.Set(name, value)
+		}
+
 		s := &scheduler.Stage{
 			Name:         taskDef.Name,
 			Task:         t,
 			DependsOn:    taskDef.DependsOn,
 			AllowFailure: taskDef.AllowFailure,
-			Variables: variables.FromMap(map[string]string{
-				// Inject job id for later use in the task runner
-				"jobID": id.String(),
-			}),
+			Variables:    taskVariables,
 		}
 
 		stages = append(stages, s)
@@ -363,7 +375,7 @@ func (r *pipelineRunner) FindJob(id uuid.UUID) *pipelineJob {
 func (r *pipelineRunner) startJob(job *pipelineJob) {
 	defer r.requestPersist()
 
-	graph, err := buildPipelineGraph(job.ID, job.Tasks)
+	graph, err := buildPipelineGraph(job.ID, job.Tasks, job.Variables)
 	if err != nil {
 		log.
 			WithError(err).
@@ -395,7 +407,7 @@ func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
-	jobIDString := t.Variables.Get("jobID").(string)
+	jobIDString := t.Variables.Get(taskctl.JobIDVariableName).(string)
 	jobID, _ := uuid.FromString(jobIDString)
 	j, ok := r.jobsByID[jobID]
 	if !ok {
@@ -427,7 +439,7 @@ func (r *pipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
-	jobIDString := stage.Variables.Get("jobID").(string)
+	jobIDString := stage.Variables.Get(taskctl.JobIDVariableName).(string)
 	jobID, _ := uuid.FromString(jobIDString)
 	j, ok := r.jobsByID[jobID]
 	if !ok {
@@ -592,7 +604,8 @@ func (r *pipelineRunner) isSchedulable(pipeline string) bool {
 }
 
 type ScheduleOpts struct {
-	User string
+	Variables map[string]interface{}
+	User      string
 }
 
 type taskResult struct {
@@ -606,6 +619,7 @@ type taskResult struct {
 	Error    *string    `json:"error"`
 }
 
+// TODO Move to server package
 type pipelineJobResult struct {
 	ID        uuid.UUID    `json:"id"`
 	Pipeline  string       `json:"pipeline"`
@@ -616,8 +630,10 @@ type pipelineJobResult struct {
 	Created   time.Time    `json:"created"`
 	Start     *time.Time   `json:"start"`
 	End       *time.Time   `json:"end"`
-	User      string       `json:"user"`
 	LastError *string      `json:"lastError"`
+
+	Variables map[string]interface{} `json:"variables"`
+	User      string                 `json:"user"`
 }
 
 type pipelineResult struct {
@@ -657,8 +673,10 @@ func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 		Created:   j.Created,
 		Start:     j.Start,
 		End:       j.End,
-		User:      j.User,
 		LastError: errToStrPtr(j.LastError),
+
+		Variables: j.Variables,
+		User:      j.User,
 	}
 }
 
@@ -750,8 +768,9 @@ func (r *pipelineRunner) SaveToStore() {
 			Created:   job.Created,
 			Start:     job.Start,
 			End:       job.End,
-			User:      job.User,
 			Tasks:     tasks,
+			Variables: job.Variables,
+			User:      job.User,
 		})
 	}
 	r.mx.RUnlock()
@@ -785,6 +804,7 @@ func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
 		Created:   pJob.Created,
 		Start:     pJob.Start,
 		End:       pJob.End,
+		Variables: pJob.Variables,
 		User:      pJob.User,
 	}
 

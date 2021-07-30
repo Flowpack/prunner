@@ -54,6 +54,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 var _ http.Handler = &server{}
 
+type pipelinesScheduleRequest struct {
+	Pipeline  string
+	Variables map[string]interface{}
+}
+
+type pipelinesScheduleResponse struct {
+	JobID string `json:"jobId"`
+}
+
 func (h *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	_, claims, _ := jwtauth.FromContext(r.Context())
 	var user string
@@ -61,14 +70,14 @@ func (h *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 		user = sub
 	}
 
-	var in scheduleInput
+	var in pipelinesScheduleRequest
 	err := json.NewDecoder(r.Body).Decode(&in)
 	if err != nil {
 		h.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error decoding JSON: %v", err))
 		return
 	}
 
-	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{User: user})
+	pJob, err := h.pRunner.ScheduleAsync(in.Pipeline, ScheduleOpts{Variables: in.Variables, User: user})
 	if err != nil {
 		// TODO Send JSON error and include expected errors (see resolveScheduleAction)
 
@@ -86,9 +95,7 @@ func (h *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 
-	_ = json.NewEncoder(w).Encode(struct {
-		JobID string `json:"jobId"`
-	}{
+	_ = json.NewEncoder(w).Encode(pipelinesScheduleResponse{
 		JobID: pJob.ID.String(),
 	})
 }

@@ -21,8 +21,10 @@ type persistedJob struct {
 	// Start is the actual start time of the job
 	Start *time.Time `json:",omitempty"`
 	// End is the actual end time of the job (can be nil if incomplete)
-	End  *time.Time `json:",omitempty"`
-	User string     `json:",omitempty"`
+	End *time.Time `json:",omitempty"`
+
+	Variables map[string]interface{} `json:",omitempty"`
+	User      string                 `json:",omitempty"`
 
 	Tasks []persistedTask
 }
@@ -42,7 +44,7 @@ type persistedTask struct {
 }
 
 type persistedData struct {
-	Jobs      []persistedJob
+	Jobs []persistedJob
 }
 
 type dataStore interface {

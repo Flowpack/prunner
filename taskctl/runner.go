@@ -18,6 +18,9 @@ import (
 	"github.com/taskctl/taskctl/pkg/variables"
 )
 
+const JobIDVariableName = "__jobID"
+
+
 // Runner extends runner.Runner (from taskctl) to implement additional features:
 // - storage of outputs
 // - callback on finished task (so we can f.e. schedule the next task when one is on the wait-queue)
@@ -159,7 +162,7 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		return err
 	}
 
-	jobID := t.Variables.Get("jobID").(string)
+	jobID := t.Variables.Get(JobIDVariableName).(string)
 
 	var (
 		stdoutWriter = []io.Writer{&t.Log.Stdout}
