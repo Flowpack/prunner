@@ -50,7 +50,8 @@ func newDebugCmd() *cli.Command {
 	}
 }
 
-func run(c *cli.Context) error {
+// appAction is the main function which starts everything. This starts the HTTP server.
+func appAction(c *cli.Context) error {
 	conf, err := loadOrCreateConfig(c.String("config"))
 	if err != nil {
 		return err
@@ -58,7 +59,7 @@ func run(c *cli.Context) error {
 
 	tokenAuth := jwtauth.New("HS256", []byte(conf.JWTSecret), nil)
 
-	// Load declared pipelines
+	// Load declared pipelines recursively
 
 	defs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
 	if err != nil {
@@ -70,19 +71,20 @@ func run(c *cli.Context) error {
 		WithField("pipelines", defs.Pipelines.NamesWithSourcePath()).
 		Infof("Loaded %d pipeline definitions", len(defs.Pipelines))
 
-	// TODO Reload pipelines on file changes
+	// TODO Handle signal USR1 for reloading config
 
 	outputStore, err := taskctl.NewOutputStore(path.Join(c.String("data"), "logs"))
 	if err != nil {
 		return errors.Wrap(err, "building output store")
 	}
 
-	// TODO For correct cancellation of tasks a single task runner and scheduler should be used when executing pipelines
+	// TODO For correct cancellation of tasks a single task runner and scheduler per pipeline execution should be used
 
 	taskRunner, err := taskctl.NewTaskRunner(outputStore)
 	if err != nil {
 		return errors.Wrap(err, "building task runner")
 	}
+	// Do not output task stdout / stderr to the server process. NOTE: Before/After execution logs won't be visible because of this
 	taskRunner.Stdout = io.Discard
 	taskRunner.Stderr = io.Discard
 
@@ -112,6 +114,7 @@ func run(c *cli.Context) error {
 	return http.ListenAndServe(c.String("address"), srv)
 }
 
+// newPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
 func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskRunner taskctl.Runner, store dataStore) (*pipelineRunner, error) {
 	sched := taskctl.NewScheduler(taskRunner)
 
@@ -127,12 +130,12 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 		persistRequests: make(chan struct{}, 1),
 	}
 
-	// Listen on task changes
-	taskRunner.OnTaskChange(pRunner.handleTaskChange)
-	sched.OnStageChange(pRunner.handleStageChange)
+	// Listen on task and stage changes for syncing the job / task state
+	taskRunner.SetOnTaskChange(pRunner.HandleTaskChange)
+	sched.OnStageChange(pRunner.HandleStageChange)
 
 	if store != nil {
-		err := pRunner.initialLoadFromStore()
+		err := pRunner.InitialLoadFromStore()
 		if err != nil {
 			return nil, errors.Wrap(err, "loading from store")
 		}
@@ -143,7 +146,7 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 				case <-ctx.Done():
 					return
 				case <-pRunner.persistRequests:
-					pRunner.saveToStore()
+					pRunner.SaveToStore()
 					// Perform save at most every 3 seconds
 					time.Sleep(3 * time.Second)
 				}
@@ -154,6 +157,9 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 	return pRunner, nil
 }
 
+// pipelineRunner is the main data structure which is basically a runtime state "singleton"
+//
+// All exported functions are synced with the mx mutex and are safe for concurrent use
 type pipelineRunner struct {
 	sched              *taskctl.Scheduler
 	taskRunner         runner.Runner
@@ -161,14 +167,19 @@ type pipelineRunner struct {
 	jobsByID           map[uuid.UUID]*pipelineJob
 	jobsByPipeline     map[string][]*pipelineJob
 	waitListByPipeline map[string][]*pipelineJob
-	store              dataStore
 
+	// store is the implementation for persisting data
+	store              dataStore
+	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see newPipelineRunner)
+	// externally, call requestPersist()
 	persistRequests chan struct{}
 
 	// Mutex for reading or writing jobs and job state
 	mx sync.RWMutex
 }
 
+// pipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitlistByPipeline of pipelineRunner),
+// or currently running (jobsByID / jobsByPipeline in pipelineRunner)
 type pipelineJob struct {
 	ID        uuid.UUID
 	Pipeline  string
@@ -190,6 +201,7 @@ func (j *pipelineJob) isRunning() bool {
 	return j.Start != nil && !j.Completed && !j.Canceled
 }
 
+// jobTask is a single task invocation inside the pipelineJob
 type jobTask struct {
 	definition.TaskDef
 	Name string
@@ -338,7 +350,7 @@ func buildPipelineGraph(id uuid.UUID, tasks jobTasks) (*scheduler.ExecutionGraph
 	return g, nil
 }
 
-func (r *pipelineRunner) findJob(id uuid.UUID) *pipelineJob {
+func (r *pipelineRunner) FindJob(id uuid.UUID) *pipelineJob {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
 
@@ -371,12 +383,12 @@ func (r *pipelineRunner) startJob(job *pipelineJob) {
 	// Run graph asynchronously
 	go func() {
 		lastErr := r.sched.Schedule(graph)
-		r.jobCompleted(job.ID, lastErr)
+		r.JobCompleted(job.ID, lastErr)
 	}()
 }
 
-// handleTaskChange will be called when the task state changes in the task runner
-func (r *pipelineRunner) handleTaskChange(t *task.Task) {
+// HandleTaskChange will be called when the task state changes in the task runner
+func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -407,8 +419,8 @@ func (r *pipelineRunner) handleTaskChange(t *task.Task) {
 	r.requestPersist()
 }
 
-// handleStageChange will be called when the stage state changes in the scheduler
-func (r *pipelineRunner) handleStageChange(stage *scheduler.Stage) {
+// HandleStageChange will be called when the stage state changes in the scheduler
+func (r *pipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -429,7 +441,7 @@ func (r *pipelineRunner) handleStageChange(stage *scheduler.Stage) {
 	r.requestPersist()
 }
 
-func (r *pipelineRunner) jobCompleted(id uuid.UUID, err error) {
+func (r *pipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -647,7 +659,7 @@ func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
 	}
 }
 
-func (r *pipelineRunner) initialLoadFromStore() error {
+func (r *pipelineRunner) InitialLoadFromStore() error {
 	log.
 		WithField("component", "runner").
 		Debug("Loading state from store")
@@ -703,7 +715,7 @@ func (r *pipelineRunner) initialLoadFromStore() error {
 	return nil
 }
 
-func (r *pipelineRunner) saveToStore() {
+func (r *pipelineRunner) SaveToStore() {
 	log.
 		WithField("component", "runner").
 		Debugf("Saving job state to data store")

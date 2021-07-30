@@ -18,7 +18,7 @@ type mockRunner struct {
 	onTaskChange func(t *task.Task)
 }
 
-func (m *mockRunner) OnTaskChange(f func(t *task.Task)) {
+func (m *mockRunner) SetOnTaskChange(f func(t *task.Task)) {
 	m.onTaskChange = f
 }
 

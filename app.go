@@ -10,6 +10,7 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// NewApp builds a CLI app with the main entry point (called from cmd/prunner/main.go)
 func NewApp() *cli.App {
 	app := cli.NewApp()
 	app.Usage = "Pipeline runner"
@@ -18,7 +19,8 @@ func NewApp() *cli.App {
 		setLogHandler(c)
 		return nil
 	}
-	app.Action = run
+	// this is the main action - see prunner.go
+	app.Action = appAction
 	app.Flags = []cli.Flag{
 		&cli.BoolFlag{
 			Name:    "verbose",

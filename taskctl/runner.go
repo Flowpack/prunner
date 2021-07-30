@@ -1,4 +1,3 @@
-// Package taskctl contains custom implementations of taskctl types
 package taskctl
 
 import (
@@ -19,9 +18,13 @@ import (
 	"github.com/taskctl/taskctl/pkg/variables"
 )
 
+// Runner extends runner.Runner (from taskctl) to implement additional features:
+// - storage of outputs
+// - callback on finished task (so we can f.e. schedule the next task when one is on the wait-queue)
+// The file https://github.com/taskctl/taskctl/blob/master/pkg/runner/runner.go is the original basis of this file.
 type Runner interface {
 	runner.Runner
-	OnTaskChange(func(t *task.Task))
+	SetOnTaskChange(func(t *task.Task))
 }
 
 // TaskRunner run tasks
@@ -53,7 +56,7 @@ type TaskRunner struct {
 var _ Runner = &TaskRunner{}
 
 // NewTaskRunner creates new TaskRunner instance
-func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, error) {
+func NewTaskRunner(outputStore OutputStore, opts ...Opts) (*TaskRunner, error) {
 	r := &TaskRunner{
 		compiler:     runner.NewTaskCompiler(),
 		OutputFormat: output.FormatRaw,
@@ -78,7 +81,9 @@ func NewTaskRunner(outputStore *FileOutputStore, opts ...Opts) (*TaskRunner, err
 	return r, nil
 }
 
-func (r *TaskRunner) OnTaskChange(f func(t *task.Task)) {
+// SetOnTaskChange is synchronous; so you can read the task in any way inside the callback because there is no concurrent access
+// of the task
+func (r *TaskRunner) SetOnTaskChange(f func(t *task.Task)) {
 	r.onTaskChange = f
 }
 
@@ -156,34 +161,40 @@ func (r *TaskRunner) Run(t *task.Task) error {
 
 	jobID := t.Variables.Get("jobID").(string)
 
-	stdoutStorer, err := r.outputStore.Writer(jobID, t.Name, "stdout")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		stdoutStorer.Close()
-	}()
+	var (
+		stdoutWriter = []io.Writer{&t.Log.Stdout}
+		stderrWriter = []io.Writer{&t.Log.Stderr}
+	)
+	if r.outputStore != nil {
+		{
+			stdoutStorer, err := r.outputStore.Writer(jobID, t.Name, "stdout")
+			if err != nil {
+				return err
+			}
+			defer func() {
+				stdoutStorer.Close()
+			}()
+			stdoutWriter = append(stdoutWriter, stdoutStorer)
+		}
 
-	stderrStorer, err := r.outputStore.Writer(jobID, t.Name, "stderr")
-	if err != nil {
-		return err
+		{
+			stderrStorer, err := r.outputStore.Writer(jobID, t.Name, "stderr")
+			if err != nil {
+				return err
+			}
+			defer func() {
+				stderrStorer.Close()
+			}()
+			stderrWriter = append(stderrWriter, stderrStorer)
+		}
 	}
-	defer func() {
-		stderrStorer.Close()
-	}()
 
 	job, err := r.compiler.CompileTask(
 		t,
 		execContext,
 		stdin,
-		io.MultiWriter(
-			&t.Log.Stdout,
-			stdoutStorer,
-		),
-		io.MultiWriter(
-			&t.Log.Stderr,
-			stderrStorer,
-		),
+		io.MultiWriter(stdoutWriter...),
+		io.MultiWriter(stderrWriter...),
 		env,
 		vars,
 	)
@@ -406,3 +417,19 @@ func (r *TaskRunner) notifyTaskChange(t *task.Task) {
 
 // Opts is a task runner configuration function.
 type Opts func(*TaskRunner)
+
+// WithContexts adds provided contexts to task runner
+func WithContexts(contexts map[string]*runner.ExecutionContext) Opts {
+	return func(runner *TaskRunner) {
+		runner.contexts = contexts
+	}
+}
+
+// WithVariables adds provided variables to task runner
+func WithVariables(variables variables.Container) Opts {
+	return func(runner *TaskRunner) {
+		runner.variables = variables
+		// TODO The variables field is not exported
+		// runner.compiler.variables = variables
+	}
+}

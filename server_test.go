@@ -121,12 +121,12 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 	assert.NotEmpty(t, result.JobID)
 	jobID := uuid.Must(uuid.FromString(result.JobID))
 
-	job := pRunner.findJob(jobID)
+	job := pRunner.FindJob(jobID)
 	require.NotNil(t, job)
 
 	// Wait until job is completed (busy waiting style)
 	waitForCondition(t, func() bool {
-		j := pRunner.findJob(jobID)
+		j := pRunner.FindJob(jobID)
 		return j != nil && j.Completed
 	}, 50*time.Millisecond, "job exists and is completed")
 }

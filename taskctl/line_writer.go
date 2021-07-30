@@ -5,6 +5,8 @@ import (
 	"sync"
 )
 
+// LineWriter splits written data into lines
+// This is not used yet but prepared for streaming output later.
 type LineWriter struct {
 	mx        sync.RWMutex
 	lines     [][]byte

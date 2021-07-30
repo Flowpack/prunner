@@ -141,7 +141,7 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := h.pRunner.findJob(jobID)
+	job := h.pRunner.FindJob(jobID)
 	if job == nil {
 		h.sendError(w, http.StatusNotFound, "Job not found")
 		return

@@ -9,12 +9,12 @@ ignored_folders:
   - templates
 included_extensions:
   - .go
-build_target_path: "."
+build_target_path: "./cmd/prunner"
 build_path: ./tmp/
 build_flags: []
 build_delay: 200ns
 binary_name: refresh-build
-command_flags: []
+command_flags: ['--path', 'examples']
 command_env: []
 enable_colors: true
 log_name: ""
