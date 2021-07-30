@@ -36,8 +36,6 @@ A Neos/Flow PHP package providing a backend module for the current pipeline stat
 ### Requirements
 
 * Go (>= 1.16)
-* Node.js (>= 12)
-* Yarn
 
 ### Running locally
 
@@ -50,16 +48,6 @@ go run .
 > Note: for development a live reload wrapper like https://github.com/markbates/refresh is recommended.
 
 The API should now be accessible at http://localhost:9009/. The log will contain an example JWT auth token that can be used for authentication in local development.
-
-#### prunner-ui
-
-```bash
-cd prunner-ui
-yarn install
-SNOWPACK_PUBLIC_API_AUTH_TOKEN=[Example JWT token] yarn start
-```
-
-The UI should now be accessible at http://localhost:8080/.
 
 ## Security concept
 
