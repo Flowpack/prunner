@@ -112,4 +112,4 @@ The UI should now be accessible at http://localhost:8080/.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+GPL, because we are building on [taskctl](https://github.com/taskctl/taskctl) - see [LICENSE](LICENSE).
