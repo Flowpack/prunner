@@ -119,11 +119,14 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 	sched := taskctl.NewScheduler(taskRunner)
 
 	pRunner := &pipelineRunner{
-		defs:               defs,
-		sched:              sched,
-		taskRunner:         taskRunner,
+		defs:       defs,
+		sched:      sched,
+		taskRunner: taskRunner,
+		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
 		jobsByID:           make(map[uuid.UUID]*pipelineJob),
+		// jobsByPipeline contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
 		jobsByPipeline:     make(map[string][]*pipelineJob),
+		// waitListByPipeline additionally contains all the jobs currently waiting, but not yet started (because concurrency limits have been reached)
 		waitListByPipeline: make(map[string][]*pipelineJob),
 		store:              store,
 		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
@@ -169,7 +172,7 @@ type pipelineRunner struct {
 	waitListByPipeline map[string][]*pipelineJob
 
 	// store is the implementation for persisting data
-	store              dataStore
+	store dataStore
 	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see newPipelineRunner)
 	// externally, call requestPersist()
 	persistRequests chan struct{}
@@ -178,7 +181,7 @@ type pipelineRunner struct {
 	mx sync.RWMutex
 }
 
-// pipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitlistByPipeline of pipelineRunner),
+// pipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of pipelineRunner),
 // or currently running (jobsByID / jobsByPipeline in pipelineRunner)
 type pipelineJob struct {
 	ID        uuid.UUID
@@ -694,22 +697,19 @@ func (r *pipelineRunner) InitialLoadFromStore() error {
 				Warnf("Found running job when restoring state, marked as canceled")
 		}
 
-		r.jobsByID[pJob.ID] = job
-		r.jobsByPipeline[pJob.Pipeline] = append(r.jobsByPipeline[pJob.Pipeline], job)
-	}
+		// Cancel jobs which have been scheduled on wait list but never been started
+		if job.Start == nil {
+			job.Canceled = true
 
-	for pipeline, waitList := range data.WaitLists {
-		for _, jobID := range waitList {
-			job := r.jobsByID[jobID]
-			if job == nil {
-				log.Errorf("Job %s on wait list for pipeline %s was not defined", jobID, pipeline)
-				continue
-			}
-
-			r.waitListByPipeline[pipeline] = append(r.waitListByPipeline[pipeline], job)
+			log.
+				WithField("component", "runner").
+				WithField("jobID", job.ID).
+				WithField("pipeline", job.Pipeline).
+				Warnf("Found job on wait list when restoring state, marked as canceled")
 		}
 
-		r.startJobsOnWaitList(pipeline)
+		r.jobsByID[pJob.ID] = job
+		r.jobsByPipeline[pJob.Pipeline] = append(r.jobsByPipeline[pJob.Pipeline], job)
 	}
 
 	return nil
@@ -722,8 +722,7 @@ func (r *pipelineRunner) SaveToStore() {
 
 	r.mx.RLock()
 	data := &persistedData{
-		Jobs:      make([]persistedJob, 0, len(r.jobsByID)),
-		WaitLists: make(map[string][]uuid.UUID),
+		Jobs: make([]persistedJob, 0, len(r.jobsByID)),
 	}
 	for _, job := range r.jobsByID {
 		tasks := make([]persistedTask, len(job.Tasks))
@@ -754,13 +753,6 @@ func (r *pipelineRunner) SaveToStore() {
 			User:      job.User,
 			Tasks:     tasks,
 		})
-	}
-	for pipeline, jobs := range r.waitListByPipeline {
-		waitList := make([]uuid.UUID, len(jobs))
-		for i, job := range jobs {
-			waitList[i] = job.ID
-		}
-		data.WaitLists[pipeline] = waitList
 	}
 	r.mx.RUnlock()
 

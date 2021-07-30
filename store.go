@@ -43,7 +43,6 @@ type persistedTask struct {
 
 type persistedData struct {
 	Jobs      []persistedJob
-	WaitLists map[string][]uuid.UUID
 }
 
 type dataStore interface {
@@ -72,9 +71,7 @@ func newJSONDataStore(path string) (*jsonDataStore, error) {
 func (j *jsonDataStore) Load() (*persistedData, error) {
 	f, err := os.Open(path.Join(j.path, "data.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return &persistedData{
-			WaitLists: make(map[string][]uuid.UUID),
-		}, nil
+		return &persistedData{}, nil
 	} else if err != nil {
 		return nil, errors.Wrap(err, "opening file")
 	}
