@@ -831,6 +831,7 @@ func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
 	return job
 }
 
+// sortTasksByDependencies is used only for the UI, to have a stable sorting
 func (jt jobTasks) sortTasksByDependencies() {
 	// Apply topological sorting (see https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm)
 

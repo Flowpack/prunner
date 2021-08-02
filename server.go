@@ -1,18 +1,25 @@
 package prunner
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"time"
 
 	"github.com/apex/log"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
+	jsontime "github.com/liamylian/jsontime/v2/v2"
 	"networkteam.com/lab/prunner/taskctl"
 )
+
+var json = jsontime.ConfigWithCustomTimeFormat
+
+func init() {
+	jsontime.SetDefaultTimeFormat(time.RFC3339, time.Local)
+}
 
 type server struct {
 	pRunner     *pipelineRunner
