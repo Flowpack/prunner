@@ -18,3 +18,8 @@ func TestLoadRecursively_WithDuplicate(t *testing.T) {
 	_, err := LoadRecursively("../test/fixtures/**/{pipelines,dup}.{yml,yaml}")
 	require.EqualError(t, err, `loading ../test/fixtures/pipelines.yml: pipeline "test_it" was already declared in ../test/fixtures/dup.yml`)
 }
+
+func TestLoadRecursively_WithMissingDependency(t *testing.T) {
+	_, err := LoadRecursively("../test/fixtures/missingDep.yml")
+	require.EqualError(t, err, `loading ../test/fixtures/missingDep.yml: missing task "not_existing" in pipeline "test_it" referenced in depends_on of task "test"`)
+}
