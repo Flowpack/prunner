@@ -18,7 +18,7 @@ import (
 var json = jsontime.ConfigWithCustomTimeFormat
 
 func init() {
-	jsontime.SetDefaultTimeFormat(time.RFC3339, time.Local)
+	jsontime.SetDefaultTimeFormat(time.RFC3339, time.UTC)
 }
 
 type server struct {

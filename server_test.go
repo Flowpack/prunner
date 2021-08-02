@@ -180,5 +180,5 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	require.NoError(t, err)
 
 	// the default is RFC3339Nano; but we use RFC3339
-	require.Equal(t, job.Created.Format(time.RFC3339), result2.Jobs[0].Created)
+	require.Equal(t, job.Created.In(time.UTC).Format(time.RFC3339), result2.Jobs[0].Created)
 }
