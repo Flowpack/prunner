@@ -139,6 +139,10 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 	jobIDString := vars.Get("id")
 	jobID, err := uuid.FromString(jobIDString)
 	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobIdString", jobIDString).
+			Warn("Invalid job ID")
 		h.sendError(w, http.StatusBadRequest, "Invalid job id")
 		return
 	}
