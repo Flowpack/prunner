@@ -165,7 +165,6 @@ type pipelineRunner struct {
 
 	// Mutex for reading or writing jobs and job state
 	mx               sync.RWMutex
-	outputStore      taskctl.OutputStore
 	createTaskRunner func() taskctl.Runner
 }
 
