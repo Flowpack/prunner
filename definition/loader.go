@@ -56,7 +56,7 @@ func (d *PipelinesDef) Load(path string) error {
 			for _, dependentTask := range taskDef.DependsOn {
 				_, exists := pipelineDef.Tasks[dependentTask]
 				if !exists {
-					return errors.Errorf("Did not find task dependency %q in pipeline %q, task %q.", dependentTask, pipelineName, taskName)
+					return errors.Errorf("missing task %q in pipeline %q referenced in depends_on of task %q", dependentTask, pipelineName, taskName)
 				}
 			}
 		}
