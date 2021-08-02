@@ -74,23 +74,22 @@ func appAction(c *cli.Context) error {
 		return errors.Wrap(err, "building output store")
 	}
 
-	// TODO For correct cancellation of tasks a single task runner and scheduler per pipeline execution should be used
-
-	taskRunner, err := taskctl.NewTaskRunner(outputStore)
-	if err != nil {
-		return errors.Wrap(err, "building task runner")
-	}
-	// Do not output task stdout / stderr to the server process. NOTE: Before/After execution logs won't be visible because of this
-	taskRunner.Stdout = io.Discard
-	taskRunner.Stderr = io.Discard
-
 	store, err := newJSONDataStore(path.Join(c.String("data")))
 	if err != nil {
 		return errors.Wrap(err, "building pipeline runner store")
 	}
 
 	// Set up pipeline runner
-	pRunner, err := newPipelineRunner(c.Context, defs, taskRunner, store)
+	pRunner, err := newPipelineRunner(c.Context, defs, func() taskctl.Runner {
+		// taskctl.NewTaskRunner never actually returns an error
+		taskRunner, _ := taskctl.NewTaskRunner(outputStore)
+
+		// Do not output task stdout / stderr to the server process. NOTE: Before/After execution logs won't be visible because of this
+		taskRunner.Stdout = io.Discard
+		taskRunner.Stderr = io.Discard
+
+		return taskRunner
+	}, store)
 	if err != nil {
 		return err
 	}
@@ -111,13 +110,9 @@ func appAction(c *cli.Context) error {
 }
 
 // newPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
-func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskRunner taskctl.Runner, store dataStore) (*pipelineRunner, error) {
-	sched := taskctl.NewScheduler(taskRunner)
-
+func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store dataStore) (*pipelineRunner, error) {
 	pRunner := &pipelineRunner{
-		defs:       defs,
-		sched:      sched,
-		taskRunner: taskRunner,
+		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
 		jobsByID: make(map[uuid.UUID]*pipelineJob),
 		// jobsByPipeline contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -126,12 +121,9 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 		waitListByPipeline: make(map[string][]*pipelineJob),
 		store:              store,
 		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
-		persistRequests: make(chan struct{}, 1),
+		persistRequests:  make(chan struct{}, 1),
+		createTaskRunner: createTaskRunner,
 	}
-
-	// Listen on task and stage changes for syncing the job / task state
-	taskRunner.SetOnTaskChange(pRunner.HandleTaskChange)
-	sched.OnStageChange(pRunner.HandleStageChange)
 
 	if store != nil {
 		err := pRunner.InitialLoadFromStore()
@@ -160,8 +152,6 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, taskR
 //
 // All exported functions are synced with the mx mutex and are safe for concurrent use
 type pipelineRunner struct {
-	sched              *taskctl.Scheduler
-	taskRunner         runner.Runner
 	defs               *definition.PipelinesDef
 	jobsByID           map[uuid.UUID]*pipelineJob
 	jobsByPipeline     map[string][]*pipelineJob
@@ -174,7 +164,9 @@ type pipelineRunner struct {
 	persistRequests chan struct{}
 
 	// Mutex for reading or writing jobs and job state
-	mx sync.RWMutex
+	mx               sync.RWMutex
+	outputStore      taskctl.OutputStore
+	createTaskRunner func() taskctl.Runner
 }
 
 // pipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of pipelineRunner),
@@ -196,10 +188,35 @@ type pipelineJob struct {
 	// Tasks is an in-memory representation with state of tasks, sorted by dependencies
 	Tasks     jobTasks
 	LastError error
+
+	sched      *taskctl.Scheduler
+	taskRunner runner.Runner
 }
 
 func (j *pipelineJob) isRunning() bool {
 	return j.Start != nil && !j.Completed && !j.Canceled
+}
+
+func (r *pipelineRunner) initScheduler(j *pipelineJob) {
+	// For correct cancellation of tasks a single task runner and scheduler per job is used
+
+	taskRunner := r.createTaskRunner()
+
+	sched := taskctl.NewScheduler(taskRunner)
+
+	// Listen on task and stage changes for syncing the job / task state
+	taskRunner.SetOnTaskChange(r.HandleTaskChange)
+	sched.OnStageChange(r.HandleStageChange)
+
+	j.taskRunner = taskRunner
+	j.sched = sched
+}
+
+// deinitScheduler resets the scheduler and task runner for this job since they are no longer needed after a job is completed
+func (j *pipelineJob) deinitScheduler() {
+	j.sched.Finish()
+	j.sched = nil
+	j.taskRunner = nil
 }
 
 // jobTask is a single task invocation inside the pipelineJob
@@ -230,6 +247,9 @@ const (
 
 var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipeline")
 var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
+var errJobNotFound = errors.New("job not found")
+var errJobAlreadyCompleted = errors.New("job is already completed")
+var errJobNotStarted = errors.New("job is not started")
 
 func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pipelineJob, error) {
 	r.mx.Lock()
@@ -295,8 +315,6 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 
 		return job, nil
 	}
-
-	// TODO Add possibility to cancel a running job (e.g. inject cancelable context in task nodes?)
 
 	r.startJob(job)
 
@@ -375,6 +393,8 @@ func (r *pipelineRunner) FindJob(id uuid.UUID) *pipelineJob {
 func (r *pipelineRunner) startJob(job *pipelineJob) {
 	defer r.requestPersist()
 
+	r.initScheduler(job)
+
 	graph, err := buildPipelineGraph(job.ID, job.Tasks, job.Variables)
 	if err != nil {
 		log.
@@ -397,7 +417,7 @@ func (r *pipelineRunner) startJob(job *pipelineJob) {
 
 	// Run graph asynchronously
 	go func() {
-		lastErr := r.sched.Schedule(graph)
+		lastErr := job.sched.Schedule(graph)
 		r.JobCompleted(job.ID, lastErr)
 	}()
 }
@@ -430,6 +450,11 @@ func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
 	jt.Error = t.Error
 	jt.ExitCode = t.ExitCode
 	jt.Skipped = t.Skipped
+
+	// Set canceled flag on the job if a task was canceled through the context
+	if errors.Is(t.Error, context.Canceled) {
+		j.Canceled = true
+	}
 
 	r.requestPersist()
 }
@@ -464,6 +489,8 @@ func (r *pipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	if job == nil {
 		return
 	}
+
+	job.deinitScheduler()
 
 	job.Completed = true
 	now := time.Now()
@@ -793,6 +820,32 @@ func (r *pipelineRunner) requestPersist() {
 		// The default case prevents blocking when sending to a full channel
 	default:
 	}
+}
+
+func (r *pipelineRunner) CancelJob(id uuid.UUID) error {
+	r.mx.Lock()
+
+	job, ok := r.jobsByID[id]
+	if !ok {
+		r.mx.Unlock()
+		return errJobNotFound
+	}
+
+	if job.Completed {
+		r.mx.Unlock()
+		return errJobAlreadyCompleted
+	}
+
+	if job.Start == nil {
+		r.mx.Unlock()
+		return errJobNotStarted
+	}
+
+	// Unlock mutext before calling cancel to prevent deadlocks from state updates
+	r.mx.Unlock()
+	job.sched.Cancel()
+
+	return nil
 }
 
 func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
