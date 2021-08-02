@@ -2,7 +2,6 @@ package prunner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -129,4 +128,57 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 		j := pRunner.FindJob(jobID)
 		return j != nil && j.Completed
 	}, 50*time.Millisecond, "job exists and is completed")
+}
+
+func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
+	taskRunner := &mockRunner{}
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
+	require.NoError(t, err)
+
+	outputStore := newMockOutputStore()
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+
+	claims := make(map[string]interface{})
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := tokenAuth.Encode(claims)
+
+	req := httptest.NewRequest("POST", "/pipelines/schedule", strings.NewReader(`{
+		"pipeline": "release_it"
+	}`))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var result struct{ JobID string }
+	err = json.NewDecoder(rec.Body).Decode(&result)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.JobID)
+	jobID := uuid.Must(uuid.FromString(result.JobID))
+
+	job := pRunner.FindJob(jobID)
+	require.NotNil(t, job)
+
+	req = httptest.NewRequest("GET", "/pipelines/jobs", strings.NewReader(""))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var result2 struct {
+		Jobs []struct {
+			Created string
+		}
+	}
+	err = json.NewDecoder(rec.Body).Decode(&result2)
+	require.NoError(t, err)
+
+	// the default is RFC3339Nano; but we use RFC3339
+	require.Equal(t, job.Created.In(time.UTC).Format(time.RFC3339), result2.Jobs[0].Created)
 }

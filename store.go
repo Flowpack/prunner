@@ -1,7 +1,6 @@
 package prunner
 
 import (
-	"encoding/json"
 	"os"
 	"path"
 	"time"
