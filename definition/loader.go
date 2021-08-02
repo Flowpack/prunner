@@ -51,6 +51,16 @@ func (d *PipelinesDef) Load(path string) error {
 		if p, exists := d.Pipelines[pipelineName]; exists {
 			return errors.Errorf("pipeline %q was already declared in %s", pipelineName, p.SourcePath)
 		}
+
+		for taskName, taskDef := range pipelineDef.Tasks {
+			for _, dependentTask := range taskDef.DependsOn {
+				_, exists := pipelineDef.Tasks[dependentTask]
+				if !exists {
+					return errors.Errorf("Did not find task dependency %q in pipeline %q, task %q.", dependentTask, pipelineName, taskName)
+				}
+			}
+		}
+
 		pipelineDef.SourcePath = path
 		d.Pipelines[pipelineName] = pipelineDef
 	}

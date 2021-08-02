@@ -1,0 +1,5 @@
+pipelines:
+  test_it:
+    tasks:
+      test:
+        depends_on: [not_existing]
