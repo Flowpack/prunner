@@ -39,15 +39,49 @@ A Neos/Flow PHP package providing a backend module for the current pipeline stat
 
 ### Running locally
 
-#### prunner
 
 ```bash
-cd prunner
-go run .
+go run cmd/prunner/main.go
 ```
 > Note: for development a live reload wrapper like https://github.com/markbates/refresh is recommended.
 
 The API should now be accessible at http://localhost:9009/. The log will contain an example JWT auth token that can be used for authentication in local development.
+
+For interacting with the API, you need a JWT token which you can generate for developing using:
+
+```bash
+go run cmd/prunner/main.go debug
+```
+
+### Building for different operating systems.
+
+Using the standard `GOOS` environment variable, you can build for different operating systems. This is helpful when you
+want to use prunner inside a Docker container, but are developing on OSX. For this, a compile step like the following is useful:
+
+```bash
+# after building, copy the executable inside the docker container; so it can be directly used.
+GOOS=linux go build cmd/prunner/main.go && docker cp main cms_neos_1:/app/main
+```
+
+### Running Tests
+
+To run all tests, use:
+
+```bash
+go test ./...
+```
+
+As linter, we use golangci-lint. See [this page for platform-specific installation instructions](https://golangci-lint.run/usage/install/#local-installation).
+Then, to run the linter, use: 
+
+```bash
+golangci-lint run
+```
+
+### Releasing
+
+Releases are done using goreleaser and GitHub Actions. Simply tag a new version using the `vX.Y.Z` naming convention,
+and then all platforms are built automatically.
 
 ## Security concept
 
@@ -72,7 +106,7 @@ The API should now be accessible at http://localhost:9009/. The log will contain
 * Graceful shutdown
   * Pipeline wait time
 * (3) on_error
-* Cancellation of running pipelines / tasks
+* Cancellation of running pipelines / tasks ✅
   * `context.Context` should be supplied when scheduling pipelines
 * (2) Persist pipeline runs and results
   * Store as JSON and save asynchronously ✅
