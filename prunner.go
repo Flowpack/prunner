@@ -842,7 +842,12 @@ func (r *pipelineRunner) CancelJob(id uuid.UUID) error {
 
 	// Unlock mutext before calling cancel to prevent deadlocks from state updates
 	r.mx.Unlock()
-	job.sched.Cancel()
+
+	// SAFEGUARD: it could happen that a job is cancelled which has never been scheduled.
+	// thus, we need to check for the existance of the job scheduler before cancelling.
+	if job.sched != nil {
+		job.sched.Cancel()
+	}
 
 	return nil
 }
