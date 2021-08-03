@@ -103,6 +103,7 @@ and then all platforms are built automatically.
     * to be defined: is this about variables being replaced/appended in replaced jobs?
   * debounced queue -> Add delay before job can start
 * Interruptible tasks?
+  * these could be safely canceled
 * Graceful shutdown
   * Pipeline wait time
 * (3) on_error
@@ -117,13 +118,13 @@ and then all platforms are built automatically.
   * Store task output in files ✅
   * Provide concurrent safe in-memory output store for running tasks ✅
   * Streaming of task stdout/stderr to API
-* (4) Pass variables to pipelines on schedule
+* (4) Pass variables to pipelines on schedule ✅
 * Timeout per task
 * Cron jobs
   * static from YAML
   * dynamic via API
 * Generate OpenAPI spec for prunner API from Go code
-* remove finished jobs after X days (or keep X per pipeline)
+* Remove finished jobs after X days (or keep X per pipeline)
 
 ### UI
 
