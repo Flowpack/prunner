@@ -14,7 +14,7 @@ build_path: ./tmp/
 build_flags: []
 build_delay: 200ns
 binary_name: refresh-build
-command_flags: ['--path', 'examples']
+command_flags: ['--path', 'examples', '--verbose']
 command_env: []
 enable_colors: true
 log_name: ""
