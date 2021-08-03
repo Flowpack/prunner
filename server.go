@@ -48,6 +48,7 @@ func newServer(pRunner *pipelineRunner, outputStore taskctl.OutputStore, logger 
 		r.Post("/schedule", srv.pipelinesSchedule)
 	})
 	r.Route("/job", func(r chi.Router) {
+		r.Get("/detail", srv.jobDetail)
 		r.Get("/logs", srv.jobLogs)
 		r.Post("/cancel", srv.jobCancel)
 	})
@@ -202,6 +203,30 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		Stdout: string(stdout),
 		Stderr: string(stderr),
 	})
+}
+
+func (h *server) jobDetail(w http.ResponseWriter, r *http.Request) {
+	vars := r.URL.Query()
+	jobIDString := vars.Get("id")
+	jobID, err := uuid.FromString(jobIDString)
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobIdString", jobIDString).
+			Warn("Invalid job ID")
+		h.sendError(w, http.StatusBadRequest, "Invalid job id")
+		return
+	}
+	job := h.pRunner.FindJob(jobID)
+	if job == nil {
+		h.sendError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+
+	result := h.pRunner.jobToResult(job)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (h *server) jobCancel(w http.ResponseWriter, r *http.Request) {
