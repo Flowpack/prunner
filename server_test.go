@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/taskctl/taskctl/pkg/task"
 	"networkteam.com/lab/prunner/definition"
+	"networkteam.com/lab/prunner/taskctl"
 )
 
 var defs = &definition.PipelinesDef{
@@ -51,12 +54,12 @@ var defs = &definition.PipelinesDef{
 }
 
 func TestServer_Pipelines(t *testing.T) {
-	taskRunner := &mockRunner{}
-
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
+	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &mockRunner{}
+	}, nil)
 	require.NoError(t, err)
 
 	outputStore := newMockOutputStore()
@@ -86,12 +89,12 @@ func TestServer_Pipelines(t *testing.T) {
 }
 
 func TestServer_PipelinesSchedule(t *testing.T) {
-	taskRunner := &mockRunner{}
-
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
+	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &mockRunner{}
+	}, nil)
 	require.NoError(t, err)
 
 	outputStore := newMockOutputStore()
@@ -131,12 +134,12 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 }
 
 func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
-	taskRunner := &mockRunner{}
-
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, taskRunner, nil)
+	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &mockRunner{}
+	}, nil)
 	require.NoError(t, err)
 
 	outputStore := newMockOutputStore()
@@ -181,4 +184,73 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 
 	// the default is RFC3339Nano; but we use RFC3339
 	require.Equal(t, job.Created.In(time.UTC).Format(time.RFC3339), result2.Jobs[0].Created)
+}
+
+func TestServer_JobCancel(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	// Test cancellation by using a wait group to wait until the task runner was canceled (simulating a long-running task)
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &mockRunner{
+			onRun: func(t *task.Task) {
+				wg.Wait()
+			},
+			onCancel: func() {
+				wg.Done()
+			},
+		}
+	}, nil)
+	require.NoError(t, err)
+
+	outputStore := newMockOutputStore()
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+
+	claims := make(map[string]interface{})
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := tokenAuth.Encode(claims)
+
+	// Schedule pipeline run
+
+	req := httptest.NewRequest("POST", "/pipelines/schedule", strings.NewReader(`{
+		"pipeline": "release_it"
+	}`))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var result struct{ JobID string }
+	err = json.NewDecoder(rec.Body).Decode(&result)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.JobID)
+	jobID := uuid.Must(uuid.FromString(result.JobID))
+
+	// Cancel job
+
+	req = httptest.NewRequest("POST", fmt.Sprintf("/job/cancel?id=%s", result.JobID), nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Check job was canceled
+
+	job := pRunner.FindJob(jobID)
+	require.NotNil(t, job)
+
+	// Wait until job is completed (busy waiting style)
+	waitForCondition(t, func() bool {
+		j := pRunner.FindJob(jobID)
+		return j != nil && j.Completed
+	}, 50*time.Millisecond, "job exists and was completed")
 }

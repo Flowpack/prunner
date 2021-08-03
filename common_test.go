@@ -15,6 +15,8 @@ import (
 
 type mockRunner struct {
 	onTaskChange func(t *task.Task)
+	onRun        func(t *task.Task)
+	onCancel     func()
 }
 
 func (m *mockRunner) SetOnTaskChange(f func(t *task.Task)) {
@@ -32,6 +34,10 @@ func (m *mockRunner) Run(t *task.Task) error {
 	log.WithField("component", "mockRunner").Debugf("Running task %s", t.Name)
 	time.Sleep(1 * time.Millisecond)
 
+	if m.onRun != nil {
+		m.onRun(t)
+	}
+
 	t.End = time.Now()
 	if m.onTaskChange != nil {
 		m.onTaskChange(t)
@@ -41,6 +47,9 @@ func (m *mockRunner) Run(t *task.Task) error {
 }
 
 func (m *mockRunner) Cancel() {
+	if m.onCancel != nil {
+		m.onCancel()
+	}
 }
 
 func (m *mockRunner) Finish() {
@@ -89,7 +98,7 @@ func waitForCondition(t *testing.T, f func() bool, wait time.Duration, msg strin
 	t.Helper()
 	var d time.Duration
 	for {
-		if d > 5*time.Second {
+		if d > 1*time.Second {
 			t.Fatalf("Timed out waiting for condition: %s", msg)
 		}
 		if f() {

@@ -1,6 +1,7 @@
 package prunner
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -48,6 +49,7 @@ func newServer(pRunner *pipelineRunner, outputStore taskctl.OutputStore, logger 
 	})
 	r.Route("/job", func(r chi.Router) {
 		r.Get("/logs", srv.jobLogs)
+		r.Post("/cancel", srv.jobCancel)
 	})
 
 	srv.handler = r
@@ -200,6 +202,42 @@ func (h *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		Stdout: string(stdout),
 		Stderr: string(stderr),
 	})
+}
+
+func (h *server) jobCancel(w http.ResponseWriter, r *http.Request) {
+	vars := r.URL.Query()
+	jobIDString := vars.Get("id")
+	jobID, err := uuid.FromString(jobIDString)
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobIdString", jobIDString).
+			Warn("Invalid job ID")
+		h.sendError(w, http.StatusBadRequest, "Invalid job id")
+		return
+	}
+
+	log.
+		WithField("component", "api").
+		WithField("jobID", jobID).
+		Info("Canceling job")
+
+	err = h.pRunner.CancelJob(jobID)
+	if errors.Is(err, errJobNotFound) {
+		h.sendError(w, http.StatusNotFound, "Job not found")
+		return
+	} else if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", jobID).
+			Errorf("Error canceling job")
+		h.sendError(w, http.StatusInternalServerError, "Error canceling job")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(true)
 }
 
 func (h *server) sendError(w http.ResponseWriter, code int, msg string) {
