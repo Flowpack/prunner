@@ -3,17 +3,18 @@ package taskctl
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/sirupsen/logrus"
 	"github.com/taskctl/taskctl/pkg/executor"
 	"github.com/taskctl/taskctl/pkg/output"
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/task"
 	"github.com/taskctl/taskctl/pkg/variables"
-	"io"
-	"os"
-	"strings"
-	"sync"
-	"time"
 )
 
 const JobIDVariableName = "__jobID"
@@ -209,11 +210,13 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		return err
 	}
 
-	err = r.execute(r.ctx, t, job)
-	if err != nil {
-		return err
+	if job != nil {
+		err = r.execute(r.ctx, t, job)
+		if err != nil {
+			return err
+		}
+		r.storeTaskOutput(t)
 	}
-	r.storeTaskOutput(t)
 
 	return r.after(r.ctx, t, env, vars)
 }

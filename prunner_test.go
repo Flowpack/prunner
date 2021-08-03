@@ -1,10 +1,14 @@
 package prunner
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"networkteam.com/lab/prunner/definition"
+	"networkteam.com/lab/prunner/taskctl"
 )
 
 func TestJobTasks_sortTasksByDependencies(t *testing.T) {
@@ -29,7 +33,7 @@ func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 			name: "simple dep",
 			input: jobTasks{
 				{
-					Name:      "b",
+					Name:    "b",
 					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
@@ -42,11 +46,11 @@ func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 			name: "chain",
 			input: jobTasks{
 				{
-					Name:      "site_export",
+					Name:    "site_export",
 					TaskDef: definition.TaskDef{DependsOn: []string{"prepare_directory"}},
 				},
 				{
-					Name:      "build_archive",
+					Name:    "build_archive",
 					TaskDef: definition.TaskDef{DependsOn: []string{"site_export"}},
 				},
 				{
@@ -62,27 +66,27 @@ func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 					Name: "a",
 				},
 				{
-					Name:      "b",
+					Name:    "b",
 					TaskDef: definition.TaskDef{DependsOn: []string{"a", "e"}},
 				},
 				{
-					Name:      "c",
+					Name:    "c",
 					TaskDef: definition.TaskDef{DependsOn: []string{"d", "b"}},
 				},
 				{
-					Name:      "d",
+					Name:    "d",
 					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
-					Name:      "e",
+					Name:    "e",
 					TaskDef: definition.TaskDef{DependsOn: []string{"a"}},
 				},
 				{
-					Name:      "f",
+					Name:    "f",
 					TaskDef: definition.TaskDef{DependsOn: []string{"b", "e"}},
 				},
 				{
-					Name:      "g",
+					Name:    "g",
 					TaskDef: definition.TaskDef{DependsOn: []string{"c", "f"}},
 				},
 			},
@@ -101,4 +105,48 @@ func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 			assert.Equal(t, tt.expected, order)
 		})
 	}
+}
+
+func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"empty_script": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"a": {
+						Script: []string{"echo A"},
+					},
+					"b": {
+						Script: []string{"echo B"},
+					},
+					"c": {
+						Script: []string{"echo C"},
+					},
+					"wait": {
+						DependsOn: []string{"a", "b", "c"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(&mockOutputStore{})
+		return taskRunner
+	}, nil)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("empty_script", ScheduleOpts{})
+	require.NoError(t, err)
+
+	waitForCondition(t, func() bool {
+		return pRunner.FindJob(job.ID).Completed
+	}, 50 * time.Millisecond, "job completed")
 }
