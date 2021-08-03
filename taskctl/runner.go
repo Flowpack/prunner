@@ -3,20 +3,17 @@ package taskctl
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"regexp"
-	"strings"
-	"sync"
-	"time"
-	"unicode/utf8"
-
 	"github.com/sirupsen/logrus"
 	"github.com/taskctl/taskctl/pkg/executor"
 	"github.com/taskctl/taskctl/pkg/output"
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/task"
 	"github.com/taskctl/taskctl/pkg/variables"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
 )
 
 const JobIDVariableName = "__jobID"
@@ -362,10 +359,7 @@ func (r *TaskRunner) checkTaskCondition(t *task.Task) (bool, error) {
 }
 
 func (r *TaskRunner) storeTaskOutput(t *task.Task) {
-	var envVarName string
 	varName := fmt.Sprintf("Tasks.%s.Output", strings.Title(t.Name))
-
-	fmt.Printf("\nSToRE TASK OUTPUT  size: %d\n", utf8.RuneCountInString(t.Log.Stdout.String()))
 
 	// we need to disable storing the task output as environment variable; otherwise we have
 	// quite serious limits how much we can execute.
@@ -373,14 +367,6 @@ func (r *TaskRunner) storeTaskOutput(t *task.Task) {
 	// "The total size of all the environment variables put together is limited at execve() time.
 	// See "Limits on size of arguments and environment" at https://man7.org/linux/man-pages/man2/execve.2.html for more information.
 	// On some systems here, this is around 2 MB (not enough!)
-	if t.ExportAs == "" {
-		envVarName = fmt.Sprintf("%s_OUTPUT", strings.ToUpper(t.Name))
-		envVarName = regexp.MustCompile("[^a-zA-Z0-9_]").ReplaceAllString(envVarName, "_")
-	} else {
-		envVarName = t.ExportAs
-	}
-
-	r.env.Set(envVarName, t.Log.Stdout.String())
 	r.variables.Set(varName, t.Log.Stdout.String())
 }
 
