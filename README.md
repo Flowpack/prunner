@@ -69,6 +69,12 @@ To run all tests, use:
 
 ```bash
 go test ./...
+
+# to show test output, run with verbose flag:
+go test ./... -v
+
+# to run a single test, use -run:
+go test ./... -v -run TestServer_HugeOutput
 ```
 
 As linter, we use golangci-lint. See [this page for platform-specific installation instructions](https://golangci-lint.run/usage/install/#local-installation).
