@@ -7,7 +7,10 @@ import (
 
 	"github.com/friendsofgo/errors"
 	"github.com/gofrs/uuid"
+	jsoniter "github.com/json-iterator/go"
 )
+
+var json = jsoniter.ConfigFastest
 
 type persistedJob struct {
 	ID       uuid.UUID
@@ -57,7 +60,7 @@ type jsonDataStore struct {
 
 var _ dataStore = &jsonDataStore{}
 
-func newJSONDataStore(path string) (*jsonDataStore, error) {
+func NewJSONDataStore(path string) (*jsonDataStore, error) {
 	// Make sure directory for store file exists
 	err := os.MkdirAll(path, 0777)
 	if err != nil {

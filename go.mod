@@ -1,4 +1,4 @@
-module networkteam.com/lab/prunner
+module github.com/Flowpack/prunner
 
 go 1.16
 
@@ -10,7 +10,8 @@ require (
 	github.com/go-chi/chi/v5 v5.0.3
 	github.com/go-chi/jwtauth/v5 v5.0.1
 	github.com/gofrs/uuid v4.0.0+incompatible
-	github.com/liamylian/jsontime/v2 v2.0.0 // indirect
+	github.com/json-iterator/go v1.1.9
+	github.com/liamylian/jsontime/v2 v2.0.0
 	github.com/mattn/go-isatty v0.0.13
 	github.com/mattn/go-zglob v0.0.3
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect

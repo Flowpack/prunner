@@ -4,13 +4,12 @@ import (
 	"os"
 
 	"github.com/apex/log"
-	"networkteam.com/lab/prunner"
+
+	"github.com/Flowpack/prunner/app"
 )
 
 func main() {
-	app := prunner.NewApp()
-
-	err := app.Run(os.Args)
+	err := app.New().Run(os.Args)
 	if err != nil {
 		log.Fatalf("Error: %s", err)
 	}

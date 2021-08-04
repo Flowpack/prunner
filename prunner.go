@@ -2,123 +2,53 @@ package prunner
 
 import (
 	"context"
-	stderrors "errors"
-	"io"
-	"net/http"
-	"path"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/apex/log"
 	"github.com/friendsofgo/errors"
-	"github.com/go-chi/jwtauth/v5"
 	"github.com/gofrs/uuid"
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/task"
 	"github.com/taskctl/taskctl/pkg/variables"
-	"github.com/urfave/cli/v2"
-	"networkteam.com/lab/prunner/definition"
-	"networkteam.com/lab/prunner/taskctl"
+
+	"github.com/Flowpack/prunner/definition"
+	"github.com/Flowpack/prunner/helper"
+	"github.com/Flowpack/prunner/taskctl"
 )
 
-func newDebugCmd() *cli.Command {
-	return &cli.Command{
-		Name:  "debug",
-		Usage: "Get authorization information for debugging",
-		Action: func(c *cli.Context) error {
-			conf, err := loadOrCreateConfig(c.String("config"))
-			if err != nil {
-				return err
-			}
+// PipelineRunner is the main data structure which is basically a runtime state "singleton"
+//
+// All exported functions are synced with the mx mutex and are safe for concurrent use
+type PipelineRunner struct {
+	defs               *definition.PipelinesDef
+	jobsByID           map[uuid.UUID]*PipelineJob
+	jobsByPipeline     map[string][]*PipelineJob
+	waitListByPipeline map[string][]*PipelineJob
 
-			tokenAuth := jwtauth.New("HS256", []byte(conf.JWTSecret), nil)
+	// store is the implementation for persisting data
+	store dataStore
+	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see NewPipelineRunner)
+	// externally, call requestPersist()
+	persistRequests chan struct{}
 
-			claims := make(map[string]interface{})
-			jwtauth.SetIssuedNow(claims)
-			_, tokenString, _ := tokenAuth.Encode(claims)
-			log.Infof("Send the following HTTP header for JWT authorization:\n    Authorization: Bearer %s", tokenString)
-
-			return nil
-		},
-	}
+	// Mutex for reading or writing jobs and job state
+	mx               sync.RWMutex
+	createTaskRunner func() taskctl.Runner
 }
 
-// appAction is the main function which starts everything. This starts the HTTP server.
-func appAction(c *cli.Context) error {
-	conf, err := loadOrCreateConfig(c.String("config"))
-	if err != nil {
-		return err
-	}
-
-	tokenAuth := jwtauth.New("HS256", []byte(conf.JWTSecret), nil)
-
-	// Load declared pipelines recursively
-
-	defs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
-	if err != nil {
-		return errors.Wrap(err, "loading definitions")
-	}
-
-	log.
-		WithField("component", "cli").
-		WithField("pipelines", defs.Pipelines.NamesWithSourcePath()).
-		Infof("Loaded %d pipeline definitions", len(defs.Pipelines))
-
-	// TODO Handle signal USR1 for reloading config
-
-	outputStore, err := taskctl.NewOutputStore(path.Join(c.String("data"), "logs"))
-	if err != nil {
-		return errors.Wrap(err, "building output store")
-	}
-
-	store, err := newJSONDataStore(path.Join(c.String("data")))
-	if err != nil {
-		return errors.Wrap(err, "building pipeline runner store")
-	}
-
-	// Set up pipeline runner
-	pRunner, err := newPipelineRunner(c.Context, defs, func() taskctl.Runner {
-		// taskctl.NewTaskRunner never actually returns an error
-		taskRunner, _ := taskctl.NewTaskRunner(outputStore)
-
-		// Do not output task stdout / stderr to the server process. NOTE: Before/After execution logs won't be visible because of this
-		taskRunner.Stdout = io.Discard
-		taskRunner.Stderr = io.Discard
-
-		return taskRunner
-	}, store)
-	if err != nil {
-		return err
-	}
-
-	srv := newServer(
-		pRunner,
-		outputStore,
-		newHttpLogger(c),
-		tokenAuth,
-	)
-
-	// Set up a simple REST API for listing jobs and scheduling pipelines
-
-	log.
-		WithField("component", "cli").
-		Infof("HTTP API Listening on %s", c.String("address"))
-	return http.ListenAndServe(c.String("address"), srv)
-}
-
-// newPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
-func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store dataStore) (*pipelineRunner, error) {
-	pRunner := &pipelineRunner{
+// NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
+func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store dataStore) (*PipelineRunner, error) {
+	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
-		jobsByID: make(map[uuid.UUID]*pipelineJob),
+		jobsByID: make(map[uuid.UUID]*PipelineJob),
 		// jobsByPipeline contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
-		jobsByPipeline: make(map[string][]*pipelineJob),
+		jobsByPipeline: make(map[string][]*PipelineJob),
 		// waitListByPipeline additionally contains all the jobs currently waiting, but not yet started (because concurrency limits have been reached)
-		waitListByPipeline: make(map[string][]*pipelineJob),
+		waitListByPipeline: make(map[string][]*PipelineJob),
 		store:              store,
 		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
 		persistRequests:  make(chan struct{}, 1),
@@ -126,7 +56,7 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 	}
 
 	if store != nil {
-		err := pRunner.InitialLoadFromStore()
+		err := pRunner.initialLoadFromStore()
 		if err != nil {
 			return nil, errors.Wrap(err, "loading from store")
 		}
@@ -148,29 +78,9 @@ func newPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 	return pRunner, nil
 }
 
-// pipelineRunner is the main data structure which is basically a runtime state "singleton"
-//
-// All exported functions are synced with the mx mutex and are safe for concurrent use
-type pipelineRunner struct {
-	defs               *definition.PipelinesDef
-	jobsByID           map[uuid.UUID]*pipelineJob
-	jobsByPipeline     map[string][]*pipelineJob
-	waitListByPipeline map[string][]*pipelineJob
-
-	// store is the implementation for persisting data
-	store dataStore
-	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see newPipelineRunner)
-	// externally, call requestPersist()
-	persistRequests chan struct{}
-
-	// Mutex for reading or writing jobs and job state
-	mx               sync.RWMutex
-	createTaskRunner func() taskctl.Runner
-}
-
-// pipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of pipelineRunner),
-// or currently running (jobsByID / jobsByPipeline in pipelineRunner)
-type pipelineJob struct {
+// PipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of PipelineRunner),
+// or currently running (jobsByID / jobsByPipeline in PipelineRunner)
+type PipelineJob struct {
 	ID        uuid.UUID
 	Pipeline  string
 	Variables map[string]interface{}
@@ -192,11 +102,11 @@ type pipelineJob struct {
 	taskRunner runner.Runner
 }
 
-func (j *pipelineJob) isRunning() bool {
+func (j *PipelineJob) isRunning() bool {
 	return j.Start != nil && !j.Completed && !j.Canceled
 }
 
-func (r *pipelineRunner) initScheduler(j *pipelineJob) {
+func (r *PipelineRunner) initScheduler(j *PipelineJob) {
 	// For correct cancellation of tasks a single task runner and scheduler per job is used
 
 	taskRunner := r.createTaskRunner()
@@ -212,13 +122,13 @@ func (r *pipelineRunner) initScheduler(j *pipelineJob) {
 }
 
 // deinitScheduler resets the scheduler and task runner for this job since they are no longer needed after a job is completed
-func (j *pipelineJob) deinitScheduler() {
+func (j *PipelineJob) deinitScheduler() {
 	j.sched.Finish()
 	j.sched = nil
 	j.taskRunner = nil
 }
 
-// jobTask is a single task invocation inside the pipelineJob
+// jobTask is a single task invocation inside the PipelineJob
 type jobTask struct {
 	definition.TaskDef
 	Name string
@@ -246,11 +156,11 @@ const (
 
 var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipeline")
 var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
-var errJobNotFound = errors.New("job not found")
+var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
 var errJobNotStarted = errors.New("job is not started")
 
-func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pipelineJob, error) {
+func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -275,7 +185,7 @@ func (r *pipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*pip
 
 	defer r.requestPersist()
 
-	job := &pipelineJob{
+	job := &PipelineJob{
 		ID:        id,
 		Pipeline:  pipeline,
 		Created:   time.Now(),
@@ -382,14 +292,21 @@ func buildPipelineGraph(id uuid.UUID, tasks jobTasks, vars map[string]interface{
 	return g, nil
 }
 
-func (r *pipelineRunner) FindJob(id uuid.UUID) *pipelineJob {
+func (r *PipelineRunner) ReadJob(id uuid.UUID, process func(j *PipelineJob)) error {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
 
-	return r.jobsByID[id]
+	job, ok := r.jobsByID[id]
+	if !ok {
+		return ErrJobNotFound
+	}
+
+	process(job)
+
+	return nil
 }
 
-func (r *pipelineRunner) startJob(job *pipelineJob) {
+func (r *PipelineRunner) startJob(job *PipelineJob) {
 	defer r.requestPersist()
 
 	r.initScheduler(job)
@@ -422,7 +339,7 @@ func (r *pipelineRunner) startJob(job *pipelineJob) {
 }
 
 // HandleTaskChange will be called when the task state changes in the task runner
-func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
+func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -433,7 +350,7 @@ func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
 		return
 	}
 
-	jt := j.Tasks.byName(t.Name)
+	jt := j.Tasks.ByName(t.Name)
 	if jt == nil {
 		return
 	}
@@ -459,7 +376,7 @@ func (r *pipelineRunner) HandleTaskChange(t *task.Task) {
 }
 
 // HandleStageChange will be called when the stage state changes in the scheduler
-func (r *pipelineRunner) HandleStageChange(stage *scheduler.Stage) {
+func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -470,7 +387,7 @@ func (r *pipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 		return
 	}
 
-	jt := j.Tasks.byName(stage.Name)
+	jt := j.Tasks.ByName(stage.Name)
 	if jt == nil {
 		return
 	}
@@ -480,7 +397,7 @@ func (r *pipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.requestPersist()
 }
 
-func (r *pipelineRunner) JobCompleted(id uuid.UUID, err error) {
+func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
@@ -509,7 +426,7 @@ func (r *pipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	r.requestPersist()
 }
 
-func (r *pipelineRunner) startJobsOnWaitList(pipeline string) {
+func (r *PipelineRunner) startJobsOnWaitList(pipeline string) {
 	// Check wait list if another job is queued
 	waitList := r.waitListByPipeline[pipeline]
 
@@ -529,34 +446,34 @@ func (r *pipelineRunner) startJobsOnWaitList(pipeline string) {
 	r.waitListByPipeline[pipeline] = waitList
 }
 
-func (r *pipelineRunner) ListJobs() []pipelineJobResult {
+// IterateJobs calls process for each job in a read lock.
+// It is not safe to reference the job outside of the process function.
+func (r *PipelineRunner) IterateJobs(process func(j *PipelineJob)) {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
-
-	res := []pipelineJobResult{}
 
 	for _, pJob := range r.jobsByID {
-		jobRes := r.jobToResult(pJob)
-		res = append(res, jobRes)
+		process(pJob)
 	}
-
-	sort.Slice(res, func(i, j int) bool {
-		return !res[i].Created.Before(res[j].Created)
-	})
-
-	return res
 }
 
-func (r *pipelineRunner) ListPipelines() []pipelineResult {
+type PipelineInfo struct {
+	Pipeline    string
+	Schedulable bool
+	Running     bool
+}
+
+// ListPipelines lists pipelines with status information about each pipeline (is it running, is it schedulable)
+func (r *PipelineRunner) ListPipelines() []PipelineInfo {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
 
-	res := []pipelineResult{}
+	res := []PipelineInfo{}
 
 	for pipeline := range r.defs.Pipelines {
 		running := r.isRunning(pipeline)
 
-		res = append(res, pipelineResult{
+		res = append(res, PipelineInfo{
 			Pipeline:    pipeline,
 			Schedulable: r.isSchedulable(pipeline),
 			Running:     running,
@@ -570,7 +487,7 @@ func (r *pipelineRunner) ListPipelines() []pipelineResult {
 	return res
 }
 
-func (r *pipelineRunner) isRunning(pipeline string) bool {
+func (r *PipelineRunner) isRunning(pipeline string) bool {
 	for _, job := range r.jobsByPipeline[pipeline] {
 		if job.isRunning() {
 			return true
@@ -579,7 +496,7 @@ func (r *pipelineRunner) isRunning(pipeline string) bool {
 	return false
 }
 
-func (r *pipelineRunner) runningJobsCount(pipeline string) int {
+func (r *PipelineRunner) runningJobsCount(pipeline string) int {
 	running := 0
 	for _, job := range r.jobsByPipeline[pipeline] {
 		if job.isRunning() {
@@ -589,7 +506,7 @@ func (r *pipelineRunner) runningJobsCount(pipeline string) int {
 	return running
 }
 
-func (r *pipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
+func (r *PipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	pipelineDef := r.defs.Pipelines[pipeline]
 
 	runningJobsCount := r.runningJobsCount(pipeline)
@@ -616,7 +533,7 @@ func (r *pipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	return scheduleActionStart
 }
 
-func (r *pipelineRunner) isSchedulable(pipeline string) bool {
+func (r *PipelineRunner) isSchedulable(pipeline string) bool {
 	action := r.resolveScheduleAction(pipeline)
 	switch action {
 	case scheduleActionReplace:
@@ -634,85 +551,10 @@ type ScheduleOpts struct {
 	User      string
 }
 
-type taskResult struct {
-	Name     string     `json:"name"`
-	Status   string     `json:"status"`
-	Start    *time.Time `json:"start"`
-	End      *time.Time `json:"end"`
-	Skipped  bool       `json:"skipped"`
-	ExitCode int16      `json:"exitCode"`
-	Errored  bool       `json:"errored"`
-	Error    *string    `json:"error"`
-}
-
-// TODO Move to server package
-type pipelineJobResult struct {
-	ID        uuid.UUID    `json:"id"`
-	Pipeline  string       `json:"pipeline"`
-	Tasks     []taskResult `json:"tasks"`
-	Completed bool         `json:"completed"`
-	Canceled  bool         `json:"canceled"`
-	Errored   bool         `json:"errored"`
-	Created   time.Time    `json:"created"`
-	Start     *time.Time   `json:"start"`
-	End       *time.Time   `json:"end"`
-	LastError *string      `json:"lastError"`
-
-	Variables map[string]interface{} `json:"variables"`
-	User      string                 `json:"user"`
-}
-
-type pipelineResult struct {
-	Pipeline    string `json:"pipeline"`
-	Schedulable bool   `json:"schedulable"`
-	Running     bool   `json:"running"`
-}
-
-func (r *pipelineRunner) jobToResult(j *pipelineJob) pipelineJobResult {
-	var taskResults []taskResult
-
-	errored := false
-	for _, t := range j.Tasks {
-		res := taskResult{
-			Name:     t.Name,
-			Status:   t.Status,
-			Start:    t.Start,
-			End:      t.End,
-			Skipped:  t.Skipped,
-			ExitCode: t.ExitCode,
-			Errored:  t.Errored,
-			Error:    errToStrPtr(t.Error),
-		}
-		taskResults = append(taskResults, res)
-		// Collect if pipelines had a errored task
-		// TODO Check if this works if AllowFailure is true!
-		errored = errored || t.Errored
-	}
-
-	return pipelineJobResult{
-		Tasks:     taskResults,
-		ID:        j.ID,
-		Pipeline:  j.Pipeline,
-		Completed: j.Completed,
-		Canceled:  j.Canceled,
-		Errored:   errored,
-		Created:   j.Created,
-		Start:     j.Start,
-		End:       j.End,
-		LastError: errToStrPtr(j.LastError),
-
-		Variables: j.Variables,
-		User:      j.User,
-	}
-}
-
-func (r *pipelineRunner) InitialLoadFromStore() error {
+func (r *PipelineRunner) initialLoadFromStore() error {
 	log.
 		WithField("component", "runner").
 		Debug("Loading state from store")
-
-	r.mx.Lock()
-	defer r.mx.Unlock()
 
 	data, err := r.store.Load()
 	if err != nil {
@@ -759,7 +601,7 @@ func (r *pipelineRunner) InitialLoadFromStore() error {
 	return nil
 }
 
-func (r *pipelineRunner) SaveToStore() {
+func (r *PipelineRunner) SaveToStore() {
 	log.
 		WithField("component", "runner").
 		Debugf("Saving job state to data store")
@@ -782,7 +624,7 @@ func (r *pipelineRunner) SaveToStore() {
 				Skipped:      t.Skipped,
 				ExitCode:     t.ExitCode,
 				Errored:      t.Errored,
-				Error:        errToStrPtr(t.Error),
+				Error:        helper.ErrToStrPtr(t.Error),
 			}
 		}
 
@@ -812,7 +654,7 @@ func (r *pipelineRunner) SaveToStore() {
 	}
 }
 
-func (r *pipelineRunner) requestPersist() {
+func (r *PipelineRunner) requestPersist() {
 	// Debounce persist requests by not sending if the persist channel is already full (buffered with length 1)
 	select {
 	case r.persistRequests <- struct{}{}:
@@ -821,13 +663,13 @@ func (r *pipelineRunner) requestPersist() {
 	}
 }
 
-func (r *pipelineRunner) CancelJob(id uuid.UUID) error {
+func (r *PipelineRunner) CancelJob(id uuid.UUID) error {
 	r.mx.Lock()
 
 	job, ok := r.jobsByID[id]
 	if !ok {
 		r.mx.Unlock()
-		return errJobNotFound
+		return ErrJobNotFound
 	}
 
 	if job.Completed {
@@ -840,11 +682,11 @@ func (r *pipelineRunner) CancelJob(id uuid.UUID) error {
 		return errJobNotStarted
 	}
 
-	// Unlock mutext before calling cancel to prevent deadlocks from state updates
+	// Unlock mutex before calling cancel to prevent deadlocks from state updates
 	r.mx.Unlock()
 
 	// SAFEGUARD: it could happen that a job is cancelled which has never been scheduled.
-	// thus, we need to check for the existance of the job scheduler before cancelling.
+	// thus, we need to check for the existence of the job scheduler before cancelling.
 	if job.sched != nil {
 		job.sched.Cancel()
 	}
@@ -852,8 +694,8 @@ func (r *pipelineRunner) CancelJob(id uuid.UUID) error {
 	return nil
 }
 
-func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
-	job := &pipelineJob{
+func buildJobFromPersistedJob(pJob persistedJob) *PipelineJob {
+	job := &PipelineJob{
 		ID:        pJob.ID,
 		Pipeline:  pJob.Pipeline,
 		Completed: pJob.Completed,
@@ -880,7 +722,7 @@ func buildJobFromPersistedJob(pJob persistedJob) *pipelineJob {
 			Skipped:  pJobTask.Skipped,
 			ExitCode: pJobTask.ExitCode,
 			Errored:  pJobTask.Errored,
-			Error:    strPtrToErr(pJobTask.Error),
+			Error:    helper.StrPtrToErr(pJobTask.Error),
 		}
 	}
 	job.Tasks = tasks
@@ -951,7 +793,7 @@ func (jt jobTasks) sortTasksByDependencies() {
 	})
 }
 
-func (jt jobTasks) byName(name string) *jobTask {
+func (jt jobTasks) ByName(name string) *jobTask {
 	for i := range jt {
 		if jt[i].Name == name {
 			return &jt[i]
@@ -976,19 +818,4 @@ func toStatus(status int32) string {
 		return "canceled"
 	}
 	return ""
-}
-
-func errToStrPtr(err error) *string {
-	if err != nil {
-		s := err.Error()
-		return &s
-	}
-	return nil
-}
-
-func strPtrToErr(s *string) error {
-	if s == nil || *s == "" {
-		return nil
-	}
-	return stderrors.New(*s)
 }

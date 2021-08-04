@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"networkteam.com/lab/prunner/helper"
+	"github.com/Flowpack/prunner/helper"
 )
 
 func TestGenerateRandomString(t *testing.T) {

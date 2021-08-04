@@ -1,4 +1,4 @@
-package prunner
+package server
 
 import (
 	"context"
@@ -15,8 +15,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/taskctl/taskctl/pkg/task"
-	"networkteam.com/lab/prunner/definition"
-	"networkteam.com/lab/prunner/taskctl"
+
+	"github.com/Flowpack/prunner"
+	"github.com/Flowpack/prunner/definition"
+	"github.com/Flowpack/prunner/taskctl"
+	"github.com/Flowpack/prunner/test"
 )
 
 var defs = &definition.PipelinesDef{
@@ -57,16 +60,16 @@ func TestServer_Pipelines(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
-		return &mockRunner{}
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &test.MockRunner{}
 	}, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockOutputStore()
+	outputStore := test.NewMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -92,16 +95,16 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
-		return &mockRunner{}
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &test.MockRunner{}
 	}, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockOutputStore()
+	outputStore := test.NewMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -123,13 +126,16 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 	assert.NotEmpty(t, result.JobID)
 	jobID := uuid.Must(uuid.FromString(result.JobID))
 
-	job := pRunner.FindJob(jobID)
-	require.NotNil(t, job)
+	err = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {})
+	require.NoError(t, err)
 
 	// Wait until job is completed (busy waiting style)
-	waitForCondition(t, func() bool {
-		j := pRunner.FindJob(jobID)
-		return j != nil && j.Completed
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
 	}, 50*time.Millisecond, "job exists and is completed")
 }
 
@@ -137,16 +143,16 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
-		return &mockRunner{}
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &test.MockRunner{}
 	}, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockOutputStore()
+	outputStore := test.NewMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -166,8 +172,11 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	assert.NotEmpty(t, result.JobID)
 	jobID := uuid.Must(uuid.FromString(result.JobID))
 
-	job := pRunner.FindJob(jobID)
-	require.NotNil(t, job)
+	var jobCreated time.Time
+	err = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
+		jobCreated = j.Created
+	})
+	require.NoError(t, err)
 
 	req = httptest.NewRequest("GET", "/pipelines/jobs", strings.NewReader(""))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
@@ -183,7 +192,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	require.NoError(t, err)
 
 	// the default is RFC3339Nano; but we use RFC3339
-	require.Equal(t, job.Created.In(time.UTC).Format(time.RFC3339), result2.Jobs[0].Created)
+	require.Equal(t, jobCreated.In(time.UTC).Format(time.RFC3339), result2.Jobs[0].Created)
 }
 
 func TestServer_JobCancel(t *testing.T) {
@@ -194,23 +203,23 @@ func TestServer_JobCancel(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
-		return &mockRunner{
-			onRun: func(t *task.Task) {
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) {
 				wg.Wait()
 			},
-			onCancel: func() {
+			OnCancel: func() {
 				wg.Done()
 			},
 		}
 	}, nil)
 	require.NoError(t, err)
 
-	outputStore := newMockOutputStore()
+	outputStore := test.NewMockOutputStore()
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := newServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -245,12 +254,16 @@ func TestServer_JobCancel(t *testing.T) {
 
 	// Check job was canceled
 
-	job := pRunner.FindJob(jobID)
-	require.NotNil(t, job)
+	err = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {})
+	require.NoError(t, err)
 
 	// Wait until job is completed (busy waiting style)
-	waitForCondition(t, func() bool {
-		j := pRunner.FindJob(jobID)
-		return j != nil && j.Completed
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
+
 	}, 50*time.Millisecond, "job exists and was completed")
 }

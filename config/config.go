@@ -1,4 +1,4 @@
-package prunner
+package config
 
 import (
 	"os"
@@ -6,14 +6,15 @@ import (
 	"github.com/apex/log"
 	"github.com/friendsofgo/errors"
 	"gopkg.in/yaml.v2"
-	"networkteam.com/lab/prunner/helper"
+
+	"github.com/Flowpack/prunner/helper"
 )
 
-type config struct {
+type Config struct {
 	JWTSecret string `yaml:"jwt_secret"`
 }
 
-func (c config) validate() error {
+func (c Config) validate() error {
 	if c.JWTSecret == "" {
 		return errors.New("missing jwt_secret")
 	}
@@ -25,7 +26,7 @@ func (c config) validate() error {
 	return nil
 }
 
-func loadOrCreateConfig(configPath string) (*config, error) {
+func LoadOrCreateConfig(configPath string) (*Config, error) {
 	f, err := os.Open(configPath)
 	if os.IsNotExist(err) {
 		log.Infof("No config found, creating file at %s", configPath)
@@ -35,7 +36,7 @@ func loadOrCreateConfig(configPath string) (*config, error) {
 	}
 	defer f.Close()
 
-	c := new(config)
+	c := new(Config)
 
 	err = yaml.NewDecoder(f).Decode(c)
 	if err != nil {
@@ -50,7 +51,7 @@ func loadOrCreateConfig(configPath string) (*config, error) {
 	return c, nil
 }
 
-func createDefaultConfig(configPath string) (*config, error) {
+func createDefaultConfig(configPath string) (*Config, error) {
 	f, err := os.Create(configPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating config file")
@@ -61,7 +62,7 @@ func createDefaultConfig(configPath string) (*config, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "generating random string")
 	}
-	c := &config{
+	c := &Config{
 		JWTSecret: jwtSecret,
 	}
 

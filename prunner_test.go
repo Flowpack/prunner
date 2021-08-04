@@ -7,8 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"networkteam.com/lab/prunner/definition"
-	"networkteam.com/lab/prunner/taskctl"
+
+	"github.com/Flowpack/prunner/definition"
+	"github.com/Flowpack/prunner/taskctl"
+	"github.com/Flowpack/prunner/test"
 )
 
 func TestJobTasks_sortTasksByDependencies(t *testing.T) {
@@ -136,9 +138,9 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pRunner, err := newPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(&mockOutputStore{})
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
 	}, nil)
 	require.NoError(t, err)
@@ -146,7 +148,11 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	job, err := pRunner.ScheduleAsync("empty_script", ScheduleOpts{})
 	require.NoError(t, err)
 
-	waitForCondition(t, func() bool {
-		return pRunner.FindJob(job.ID).Completed
-	}, 50 * time.Millisecond, "job completed")
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(job.ID, func(j *PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
+	}, 50*time.Millisecond, "job completed")
 }

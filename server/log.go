@@ -1,25 +1,22 @@
-package prunner
+package server
 
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/apex/log"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/mattn/go-isatty"
-	"github.com/urfave/cli/v2"
 )
 
-func newHttpLogger(c *cli.Context) func(next http.Handler) http.Handler {
-	disableAnsi := c.Bool("disable-ansi")
+// StructuredLogFormatter is a middleware.LogFormatter with structured fields for production use
+func StructuredLogFormatter(logger log.Interface) *structuredLogger {
+	return &structuredLogger{logger: logger.WithField("component", "api")}
+}
 
-	if isatty.IsTerminal(os.Stdout.Fd()) && !disableAnsi {
-		return middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: apexLogAdapter{log.WithField("component", "api")}})
-	} else {
-		return middleware.RequestLogger(&structuredLogger{logger: log.WithField("component", "api")})
-	}
+// DevelopmentLogFormatter is a colored and compact middleware.LogFormatter for development use
+func DevelopmentLogFormatter(logger log.Interface) *middleware.DefaultLogFormatter {
+	return &middleware.DefaultLogFormatter{Logger: apexLogAdapter{logger.WithField("component", "api")}}
 }
 
 type apexLogAdapter struct {
@@ -69,7 +66,7 @@ type structuredLoggerEntry struct {
 
 func (l *structuredLoggerEntry) Write(status, bytes int, header http.Header, elapsed time.Duration, extra interface{}) {
 	l.Logger = l.Logger.WithFields(log.Fields{
-		"respStatus":       status,
+		"respStatus":      status,
 		"respBytesLength": bytes,
 		"respElapsedMs":   float64(elapsed.Nanoseconds()) / 1000000.0,
 	})
