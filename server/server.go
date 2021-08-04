@@ -69,15 +69,49 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 var _ http.Handler = &server{}
 
+// swagger:parameters pipelinesSchedule
 type pipelinesScheduleRequest struct {
-	Pipeline  string
-	Variables map[string]interface{}
+	// in: body
+	Body struct {
+		// Pipeline name
+		// required: true
+		// example: my_pipeline
+		Pipeline string `json:"pipeline"`
+
+		// Job variables
+		// example: {"tag_name": "v1.17.4", "databases": ["mysql", "postgresql"]}
+		Variables map[string]interface{} `json:"variables"`
+	}
 }
 
+// swagger:response
 type pipelinesScheduleResponse struct {
-	JobID string `json:"jobId"`
+	// in: body
+	Body struct {
+		// Id of the scheduled job
+		//
+		// swagger:strfmt uuid4
+		// example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+		JobID string `json:"jobId"`
+	}
 }
 
+// swagger:route POST /pipelines/schedule pipelinesSchedule
+//
+// Schedule a pipeline execution
+//
+// This will create a job for execution of the specified pipeline and variables.
+// If the pipeline is not schedulable (running and no queue / limit or concurrency exceeded) it will error.
+//
+//     Consumes:
+//     - application/json
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default: pipelinesScheduleResponse
+//       400: genericErrorResponse
 func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	_, claims, _ := jwtauth.FromContext(r.Context())
 	var user string
@@ -86,13 +120,13 @@ func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var in pipelinesScheduleRequest
-	err := json.NewDecoder(r.Body).Decode(&in)
+	err := json.NewDecoder(r.Body).Decode(&in.Body)
 	if err != nil {
 		s.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error decoding JSON: %v", err))
 		return
 	}
 
-	pJob, err := s.pRunner.ScheduleAsync(in.Pipeline, prunner.ScheduleOpts{Variables: in.Variables, User: user})
+	pJob, err := s.pRunner.ScheduleAsync(in.Body.Pipeline, prunner.ScheduleOpts{Variables: in.Body.Variables, User: user})
 	if err != nil {
 		// TODO Send JSON error and include expected errors (see resolveScheduleAction)
 
@@ -103,48 +137,82 @@ func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	log.
 		WithField("component", "api").
 		WithField("jobID", pJob.ID).
-		WithField("pipeline", in.Pipeline).
+		WithField("pipeline", in.Body.Pipeline).
 		WithField("user", user).
 		Info("Job scheduled")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 
-	_ = json.NewEncoder(w).Encode(pipelinesScheduleResponse{
-		JobID: pJob.ID.String(),
-	})
+	var resp pipelinesScheduleResponse
+	resp.Body.JobID = pJob.ID.String()
+
+	_ = json.NewEncoder(w).Encode(resp.Body)
 }
 
+// swagger:response
 type pipelinesJobsResponse struct {
-	Pipelines []pipelineResult    `json:"pipelines"`
-	Jobs      []pipelineJobResult `json:"jobs"`
+	// in: body
+	Body struct {
+		Pipelines []pipelineResult    `json:"pipelines"`
+		Jobs      []pipelineJobResult `json:"jobs"`
+	}
 }
 
+// swagger:model task
 type taskResult struct {
-	Name     string     `json:"name"`
-	Status   string     `json:"status"`
-	Start    *time.Time `json:"start"`
-	End      *time.Time `json:"end"`
-	Skipped  bool       `json:"skipped"`
-	ExitCode int16      `json:"exitCode"`
-	Errored  bool       `json:"errored"`
-	Error    *string    `json:"error"`
+	// Task name
+	// example: task_name
+	Name string `json:"name"`
+	// Status of task
+	// enum: waiting,running,skipped,done,error,canceled
+	Status string `json:"status"`
+	// When the task was started
+	Start *time.Time `json:"start,omitempty"`
+	// When the task was finished
+	End *time.Time `json:"end,omitempty"`
+	// If the task was skipped
+	Skipped bool `json:"skipped"`
+	// Exit code of command
+	ExitCode int16 `json:"exitCode"`
+	// If the task had an error
+	Errored bool `json:"errored"`
+	// Error message of task when an error occured
+	Error *string `json:"error,omitempty"`
 }
 
+// swagger:model job
 type pipelineJobResult struct {
-	ID        uuid.UUID    `json:"id"`
-	Pipeline  string       `json:"pipeline"`
-	Tasks     []taskResult `json:"tasks"`
-	Completed bool         `json:"completed"`
-	Canceled  bool         `json:"canceled"`
-	Errored   bool         `json:"errored"`
-	Created   time.Time    `json:"created"`
-	Start     *time.Time   `json:"start"`
-	End       *time.Time   `json:"end"`
-	LastError *string      `json:"lastError"`
+	// Job id
+	// swagger:strfmt uuid4
+	// example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+	ID string `json:"id"`
+	// Pipeline name
+	// example: my_pipeline
+	Pipeline string `json:"pipeline"`
+	// List of tasks in job (ordered topologically by dependencies and task name)
+	Tasks []taskResult `json:"tasks"`
+	// If the job is completed
+	Completed bool `json:"completed"`
+	// If the job was canceled
+	Canceled bool `json:"canceled"`
+	// If the job had an error
+	Errored bool `json:"errored"`
+	// When the job was created
+	Created time.Time `json:"created"`
+	// When the job was started
+	Start *time.Time `json:"start,omitempty"`
+	// When the job was finished
+	End *time.Time `json:"end,omitempty"`
+	// Error message of last task that had an error
+	LastError *string `json:"lastError,omitempty"`
 
-	Variables map[string]interface{} `json:"variables"`
-	User      string                 `json:"user"`
+	// Assigned variables of job
+	// example: {"tags": ["foo", "bar"]}
+	Variables map[string]interface{} `json:"variables,omitempty"`
+	// User that scheduled the job
+	// example: j.doe
+	User string `json:"user"`
 }
 
 func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
@@ -170,7 +238,7 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 
 	return pipelineJobResult{
 		Tasks:     taskResults,
-		ID:        j.ID,
+		ID:        j.ID.String(),
 		Pipeline:  j.Pipeline,
 		Completed: j.Completed,
 		Canceled:  j.Canceled,
@@ -185,64 +253,140 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 	}
 }
 
+// swagger:route GET /pipelines/jobs pipelinesJobs
+//
+// Get pipelines and jobs
+//
+// This is a combined operation to fetch pipelines and jobs in one request.
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default: pipelinesJobsResponse
 func (s *server) pipelinesJobs(w http.ResponseWriter, r *http.Request) {
 	pipelinesRes := s.listPipelines()
 	jobsRes := s.listPipelineJobs()
 
+	var resp pipelinesJobsResponse
+	resp.Body.Pipelines = pipelinesRes
+	resp.Body.Jobs = jobsRes
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(pipelinesJobsResponse{
-		Pipelines: pipelinesRes,
-		Jobs:      jobsRes,
-	})
+	_ = json.NewEncoder(w).Encode(resp.Body)
 }
 
+// swagger:response
 type pipelinesResponse struct {
-	Pipelines []pipelineResult `json:"pipelines"`
+	// in: body
+	Body struct {
+		Pipelines []pipelineResult `json:"pipelines"`
+	}
 }
 
+// swagger:model pipeline
 type pipelineResult struct {
-	Pipeline    string `json:"pipeline"`
-	Schedulable bool   `json:"schedulable"`
-	Running     bool   `json:"running"`
+	// Pipeline name
+	//
+	// example: my_pipeline
+	Pipeline string `json:"pipeline"`
+
+	// Is a new job for the pipeline schedulable
+	Schedulable bool `json:"schedulable"`
+
+	// Is a job for the pipeline running
+	Running bool `json:"running"`
 }
 
+// swagger:route GET /pipelines/ pipelines
+//
+// List pipelines
+//
+// This will show all defined pipelines with included information about running state or if it is possible to schedule
+// a job for this pipeline.
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default: pipelinesResponse
 func (s *server) pipelines(w http.ResponseWriter, r *http.Request) {
 	res := s.listPipelines()
 
+	var resp pipelinesResponse
+	resp.Body.Pipelines = res
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(pipelinesResponse{
-		Pipelines: res,
-	})
+	_ = json.NewEncoder(w).Encode(resp.Body)
 }
 
+// swagger:parameters jobLogs
+type jobLogsParams struct {
+	// Job id
+	//
+	// required: true
+	// in: query
+	// example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+	Id string `json:"id"`
+
+	// Task name
+	//
+	// required: true
+	// in: query
+	// example: my_task
+	Task string `json:"task"`
+}
+
+// swagger:response
 type jobLogsResponse struct {
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
+	// in: body
+	Body struct {
+		// STDOUT output of task
+		Stdout string `json:"stdout"`
+		// STDERR output of task
+		Stderr string `json:"stderr"`
+	}
 }
 
+// swagger:route GET /job/logs jobLogs
+//
+// Get job logs
+//
+// Task output for the given job and task will be fetched and returned for STDOUT / STDERR.
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default: jobLogsResponse
+//       400: genericErrorResponse
+//       404:
+//       500:
 func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
+	var params jobLogsParams
+
 	vars := r.URL.Query()
-	jobIDString := vars.Get("id")
-	jobID, err := uuid.FromString(jobIDString)
+	params.Id = vars.Get("id")
+	jobID, err := uuid.FromString(params.Id)
 	if err != nil {
 		log.
 			WithError(err).
-			WithField("jobIdString", jobIDString).
+			WithField("jobID", params.Id).
 			Warn("Invalid job ID")
 		s.sendError(w, http.StatusBadRequest, "Invalid job id")
 		return
 	}
-	taskName := vars.Get("task")
-	if taskName == "" {
+	params.Task = vars.Get("task")
+	if params.Task == "" {
 		s.sendError(w, http.StatusBadRequest, "Invalid task name")
 		return
 	}
 
 	var taskExists bool
 	err = s.pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
-		if task := j.Tasks.ByName(taskName); task != nil {
+		if task := j.Tasks.ByName(params.Task); task != nil {
 			taskExists = true
 		}
 	})
@@ -266,7 +410,7 @@ func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stdout []byte
 		stderr []byte
 	)
-	stdoutReader, err := s.outputStore.Reader(jobID.String(), taskName, "stdout")
+	stdoutReader, err := s.outputStore.Reader(jobID.String(), params.Task, "stdout")
 	if err != nil {
 		log.
 			WithError(err).
@@ -276,7 +420,7 @@ func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stdoutReader.Close()
 	}
 
-	stderrReader, err := s.outputStore.Reader(jobID.String(), taskName, "stderr")
+	stderrReader, err := s.outputStore.Reader(jobID.String(), params.Task, "stderr")
 	if err != nil {
 		log.
 			WithError(err).
@@ -286,22 +430,54 @@ func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 		stderrReader.Close()
 	}
 
+	var resp jobLogsResponse
+	resp.Body.Stdout = string(stdout)
+	resp.Body.Stderr = string(stderr)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(jobLogsResponse{
-		Stdout: string(stdout),
-		Stderr: string(stderr),
-	})
+	_ = json.NewEncoder(w).Encode(resp.Body)
 }
 
+// swagger:parameters jobDetail
+type jobDetailParams struct {
+	// Job id
+	//
+	// required: true
+	// in: query
+	// example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+	Id string `json:"id"`
+}
+
+// swagger:response
+type jobDetailResponse struct {
+	// in: body
+	Body pipelineJobResult
+}
+
+// swagger:route GET /job/detail jobDetail
+//
+// Get job details
+//
+// Get details about a single job.
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default: jobDetailResponse
+//       400: genericErrorResponse
+//       404:
 func (s *server) jobDetail(w http.ResponseWriter, r *http.Request) {
+	var params jobDetailParams
+
 	vars := r.URL.Query()
-	jobIDString := vars.Get("id")
-	jobID, err := uuid.FromString(jobIDString)
+	params.Id = vars.Get("id")
+	jobID, err := uuid.FromString(params.Id)
 	if err != nil {
 		log.
 			WithError(err).
-			WithField("jobIdString", jobIDString).
+			WithField("jobID", params.Id).
 			Warn("Invalid job ID")
 		s.sendError(w, http.StatusBadRequest, "Invalid job id")
 		return
@@ -323,19 +499,47 @@ func (s *server) jobDetail(w http.ResponseWriter, r *http.Request) {
 		s.sendError(w, http.StatusInternalServerError, "Error reading job")
 	}
 
+	var resp jobDetailResponse
+	resp.Body = result
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(resp.Body)
 }
 
+// swagger:parameters jobCancel
+type jobCancelParams struct {
+	// Job id
+	//
+	// required: true
+	// in: query
+	// example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+	Id string `json:"id"`
+}
+
+// swagger:route POST /job/cancel jobCancel
+//
+// Cancel a running job
+//
+// Cancels the job and all tasks, but does not wait until all tasks are canceled.
+//
+//     Produces:
+//     - application/json
+//
+//     Responses:
+//       default:
+//       400: genericErrorResponse
+//       404:
 func (s *server) jobCancel(w http.ResponseWriter, r *http.Request) {
+	var params jobCancelParams
+
 	vars := r.URL.Query()
-	jobIDString := vars.Get("id")
-	jobID, err := uuid.FromString(jobIDString)
+	params.Id = vars.Get("id")
+	jobID, err := uuid.FromString(params.Id)
 	if err != nil {
 		log.
 			WithError(err).
-			WithField("jobIdString", jobIDString).
+			WithField("jobIdString", params.Id).
 			Warn("Invalid job ID")
 		s.sendError(w, http.StatusBadRequest, "Invalid job id")
 		return
@@ -364,16 +568,6 @@ func (s *server) jobCancel(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(true)
 }
 
-func (s *server) sendError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(struct {
-		Error string `json:"error"`
-	}{
-		Error: msg,
-	})
-}
-
 func (s *server) listPipelineJobs() []pipelineJobResult {
 	res := []pipelineJobResult{}
 	s.pRunner.IterateJobs(func(j *prunner.PipelineJob) {
@@ -398,4 +592,23 @@ func (s *server) listPipelines() []pipelineResult {
 	}
 
 	return res
+}
+
+func (s *server) sendError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+
+	var resp genericErrorResponse
+	resp.Body.Error = msg
+
+	_ = json.NewEncoder(w).Encode(resp.Body)
+}
+
+// swagger:response genericErrorResponse
+type genericErrorResponse struct {
+	// in: body
+	Body struct {
+		// Error message
+		Error string `json:"error"`
+	}
 }

@@ -1,0 +1,351 @@
+basePath: /
+definitions:
+  job:
+    properties:
+      canceled:
+        description: If the job was canceled
+        type: boolean
+        x-go-name: Canceled
+      completed:
+        description: If the job is completed
+        type: boolean
+        x-go-name: Completed
+      created:
+        description: When the job was created
+        format: date-time
+        type: string
+        x-go-name: Created
+      end:
+        description: When the job was finished
+        format: date-time
+        type: string
+        x-go-name: End
+      errored:
+        description: If the job had an error
+        type: boolean
+        x-go-name: Errored
+      id:
+        description: Job id
+        format: uuid4
+        type: string
+        x-go-name: ID
+      lastError:
+        description: Error message of last task that had an error
+        type: string
+        x-go-name: LastError
+      pipeline:
+        description: Pipeline name
+        example: my_pipeline
+        type: string
+        x-go-name: Pipeline
+      start:
+        description: When the job was started
+        format: date-time
+        type: string
+        x-go-name: Start
+      tasks:
+        description: List of tasks in job (ordered topologically by dependencies and
+          task name)
+        items:
+          $ref: '#/definitions/task'
+        type: array
+        x-go-name: Tasks
+      user:
+        description: User that scheduled the job
+        example: j.doe
+        type: string
+        x-go-name: User
+      variables:
+        additionalProperties:
+          type: object
+        description: Assigned variables of job
+        example:
+          tags:
+          - foo
+          - bar
+        type: object
+        x-go-name: Variables
+    type: object
+    x-go-name: pipelineJobResult
+    x-go-package: github.com/Flowpack/prunner/server
+  pipeline:
+    properties:
+      pipeline:
+        description: Pipeline name
+        example: my_pipeline
+        type: string
+        x-go-name: Pipeline
+      running:
+        description: Is a job for the pipeline running
+        type: boolean
+        x-go-name: Running
+      schedulable:
+        description: Is a new job for the pipeline schedulable
+        type: boolean
+        x-go-name: Schedulable
+    type: object
+    x-go-name: pipelineResult
+    x-go-package: github.com/Flowpack/prunner/server
+  task:
+    properties:
+      end:
+        description: When the task was finished
+        format: date-time
+        type: string
+        x-go-name: End
+      error:
+        description: Error message of task when an error occured
+        type: string
+        x-go-name: Error
+      errored:
+        description: If the task had an error
+        type: boolean
+        x-go-name: Errored
+      exitCode:
+        description: Exit code of command
+        format: int16
+        type: integer
+        x-go-name: ExitCode
+      name:
+        description: Task name
+        example: task_name
+        type: string
+        x-go-name: Name
+      skipped:
+        description: If the task was skipped
+        type: boolean
+        x-go-name: Skipped
+      start:
+        description: When the task was started
+        format: date-time
+        type: string
+        x-go-name: Start
+      status:
+        description: Status of task
+        enum:
+        - waiting
+        - running
+        - skipped
+        - done
+        - error
+        - canceled
+        type: string
+        x-go-name: Status
+    type: object
+    x-go-name: taskResult
+    x-go-package: github.com/Flowpack/prunner/server
+host: localhost:8080
+info:
+  description: A REST API for scheduling pipelines and managing jobs in prunner, an
+    embedded task runner.
+  license:
+    name: MIT
+    url: http://opensource.org/licenses/MIT
+  title: Prunner REST API
+  version: 0.0.1
+paths:
+  /job/cancel:
+    post:
+      description: Cancels the job and all tasks, but does not wait until all tasks
+        are canceled.
+      operationId: jobCancel
+      parameters:
+      - description: Job id
+        example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+        in: query
+        name: id
+        required: true
+        type: string
+        x-go-name: Id
+      produces:
+      - application/json
+      responses:
+        "400":
+          $ref: '#/responses/genericErrorResponse'
+        "404":
+          description: ""
+        default:
+          description: ""
+      summary: Cancel a running job
+  /job/detail:
+    get:
+      description: Get details about a single job.
+      operationId: jobDetail
+      parameters:
+      - description: Job id
+        example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+        in: query
+        name: id
+        required: true
+        type: string
+        x-go-name: Id
+      produces:
+      - application/json
+      responses:
+        "400":
+          $ref: '#/responses/genericErrorResponse'
+        "404":
+          description: ""
+        default:
+          $ref: '#/responses/jobDetailResponse'
+      summary: Get job details
+  /job/logs:
+    get:
+      description: Task output for the given job and task will be fetched and returned
+        for STDOUT / STDERR.
+      operationId: jobLogs
+      parameters:
+      - description: Job id
+        example: 52a5cb79-7556-4c52-8e6f-dd6aaf1bc4c8
+        in: query
+        name: id
+        required: true
+        type: string
+        x-go-name: Id
+      - description: Task name
+        example: my_task
+        in: query
+        name: task
+        required: true
+        type: string
+        x-go-name: Task
+      produces:
+      - application/json
+      responses:
+        "400":
+          $ref: '#/responses/genericErrorResponse'
+        "404":
+          description: ""
+        "500":
+          description: ""
+        default:
+          $ref: '#/responses/jobLogsResponse'
+      summary: Get job logs
+  /pipelines/:
+    get:
+      description: |-
+        This will show all defined pipelines with included information about running state or if it is possible to schedule
+        a job for this pipeline.
+      operationId: pipelines
+      produces:
+      - application/json
+      responses:
+        default:
+          $ref: '#/responses/pipelinesResponse'
+      summary: List pipelines
+  /pipelines/jobs:
+    get:
+      description: This is a combined operation to fetch pipelines and jobs in one
+        request.
+      operationId: pipelinesJobs
+      produces:
+      - application/json
+      responses:
+        default:
+          $ref: '#/responses/pipelinesJobsResponse'
+      summary: Get pipelines and jobs
+  /pipelines/schedule:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        This will create a job for execution of the specified pipeline and variables.
+        If the pipeline is not schedulable (running and no queue / limit or concurrency exceeded) it will error.
+      operationId: pipelinesSchedule
+      parameters:
+      - in: body
+        name: Body
+        schema:
+          properties:
+            pipeline:
+              description: Pipeline name
+              example: my_pipeline
+              type: string
+              x-go-name: Pipeline
+            variables:
+              additionalProperties:
+                type: object
+              description: Job variables
+              example:
+                databases:
+                - mysql
+                - postgresql
+                tag_name: v1.17.4
+              type: object
+              x-go-name: Variables
+          required:
+          - pipeline
+          type: object
+      produces:
+      - application/json
+      responses:
+        "400":
+          $ref: '#/responses/genericErrorResponse'
+        default:
+          $ref: '#/responses/pipelinesScheduleResponse'
+      summary: Schedule a pipeline execution
+responses:
+  genericErrorResponse:
+    description: ""
+    schema:
+      properties:
+        error:
+          description: Error message
+          type: string
+          x-go-name: Error
+      type: object
+  jobDetailResponse:
+    description: ""
+    schema:
+      $ref: '#/definitions/job'
+  jobLogsResponse:
+    description: ""
+    schema:
+      properties:
+        stderr:
+          description: STDERR output of task
+          type: string
+          x-go-name: Stderr
+        stdout:
+          description: STDOUT output of task
+          type: string
+          x-go-name: Stdout
+      type: object
+  pipelinesJobsResponse:
+    description: ""
+    schema:
+      properties:
+        jobs:
+          items:
+            $ref: '#/definitions/job'
+          type: array
+          x-go-name: Jobs
+        pipelines:
+          items:
+            $ref: '#/definitions/pipeline'
+          type: array
+          x-go-name: Pipelines
+      type: object
+  pipelinesResponse:
+    description: ""
+    schema:
+      properties:
+        pipelines:
+          items:
+            $ref: '#/definitions/pipeline'
+          type: array
+          x-go-name: Pipelines
+      type: object
+  pipelinesScheduleResponse:
+    description: ""
+    schema:
+      properties:
+        jobId:
+          description: Id of the scheduled job
+          format: uuid4
+          type: string
+          x-go-name: JobID
+      type: object
+schemes:
+- http
+swagger: "2.0"

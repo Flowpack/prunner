@@ -1,0 +1,42 @@
+name: Check & deploy API documentation
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy-doc:
+    if: ${{ github.event_name == 'push' }}
+    name: Deploy API documentation on Bump
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Deploy API documentation
+        uses: bump-sh/github-action@v1
+        with:
+          doc: prunner
+          token: ${{secrets.BUMP_TOKEN}}
+          file: server/swagger.yml
+
+  api-diff:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: Check API diff on Bump
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Comment pull request with API diff
+        uses: bump-sh/github-action@v1
+        with:
+          doc: prunner
+          token: ${{secrets.BUMP_TOKEN}}
+          file: server/swagger.yml
+          command: diff
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
