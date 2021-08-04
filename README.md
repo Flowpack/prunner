@@ -223,6 +223,15 @@ Then, to run the linter, use:
 golangci-lint run
 ```
 
+### Generate OpenAPI (Swagger) spec
+
+An OpenAPI 2.0 spec is generated from the Go types and annoations in source code using the `go-swagger` tool (it is not
+bundled in this module). See https://goswagger.io/install.html for installation instructions.
+
+```bash
+go generate ./server
+```
+
 ### Releasing
 
 Releases are done using goreleaser and GitHub Actions. Simply tag a new version using the `vX.Y.Z` naming convention,
