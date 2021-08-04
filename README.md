@@ -235,42 +235,6 @@ and then all platforms are built automatically.
 * An application that wants to embed prunner should read the shared secret and generate a JWT auth token for accessing the API by
   doing internal HTTP requests. This way custom policies can be implemented for ensuring access to prunner.
 
-## TODO
-
-* Lockfile to prevent concurrent run of Prunner?
-* (1) Concurrency strategy for pipelines:
-  * concurrency factor + wait list size (0, bounded, unbounded) ✅
-  * queue (with limit) ✅
-  * replace queued jobs ✅
-    * optional: interrupt running
-  * append / replace strategy for queueing ✅
-  * variable append / replace strategy (i.e. todo list)
-    * to be defined: is this about variables being replaced/appended in replaced jobs?
-  * debounced queue -> Add delay before job can start
-* Interruptible tasks?
-  * these could be safely canceled
-* Graceful shutdown
-  * Pipeline wait time
-* (3) on_error
-* Cancellation of running pipelines / tasks ✅
-  * `context.Context` should be supplied when scheduling pipelines
-* (2) Persist pipeline runs and results
-  * Store as JSON and save asynchronously ✅
-  * Store output in files separate from metadata ✅
-  * Cleanup of output after X days / runs
-* Recover state of broken pipelines (after prunner crash) ✅
-* Correct handling of stdout/stderr
-  * Store task output in files ✅
-  * Provide concurrent safe in-memory output store for running tasks ✅
-  * Streaming of task stdout/stderr to API
-* (4) Pass variables to pipelines on schedule ✅
-* Timeout per task
-* Cron jobs
-  * static from YAML
-  * dynamic via API
-* Generate OpenAPI spec for prunner API from Go code
-* Remove finished jobs after X days (or keep X per pipeline)
-
 ### UI
 
 * Show auth errors in UI
