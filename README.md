@@ -4,7 +4,7 @@
 
 - Good for orchestrating long-running jobs with multiple steps; so if you think "I need a CI pipeline" but within your project, this is for you.
 - The pipeline definition is done in a `pipelines.yml` file and is static.
-- To start a new job, you use an authenticated HTTP API.
+- To start a new job, you use an authenticated HTTP API (see our [API docs](https://bump.sh/doc/prunner)).
 - Every task inside the pipeline is a script run on the command line.
 - Tasks can have dependencies; so together, they form a graph (DAG)
 - supports pipeline arguments
