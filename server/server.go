@@ -255,7 +255,7 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 
 // swagger:route GET /pipelines/jobs pipelinesJobs
 //
-// Fetch pipelines and jobs
+// Get pipelines and jobs
 //
 // This is a combined operation to fetch pipelines and jobs in one request.
 //
@@ -343,20 +343,27 @@ type jobLogsParams struct {
 type jobLogsResponse struct {
 	// in: body
 	Body struct {
+		// STDOUT output of task
 		Stdout string `json:"stdout"`
+		// STDERR output of task
 		Stderr string `json:"stderr"`
 	}
 }
 
 // swagger:route GET /job/logs jobLogs
 //
-// Fetch job logs
+// Get job logs
+//
+// Task output for the given job and task will be fetched and returned for STDOUT / STDERR.
 //
 //     Produces:
 //     - application/json
 //
 //     Responses:
 //       default: jobLogsResponse
+//       400: genericErrorResponse
+//       404:
+//       500:
 func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 	var params jobLogsParams
 
@@ -450,7 +457,9 @@ type jobDetailResponse struct {
 
 // swagger:route GET /job/detail jobDetail
 //
-// Fetch job details
+// Get job details
+//
+// Get details about a single job.
 //
 //     Produces:
 //     - application/json
@@ -460,13 +469,15 @@ type jobDetailResponse struct {
 //       400: genericErrorResponse
 //       404:
 func (s *server) jobDetail(w http.ResponseWriter, r *http.Request) {
+	var params jobDetailParams
+
 	vars := r.URL.Query()
-	jobIDString := vars.Get("id")
-	jobID, err := uuid.FromString(jobIDString)
+	params.Id = vars.Get("id")
+	jobID, err := uuid.FromString(params.Id)
 	if err != nil {
 		log.
 			WithError(err).
-			WithField("jobID", jobIDString).
+			WithField("jobID", params.Id).
 			Warn("Invalid job ID")
 		s.sendError(w, http.StatusBadRequest, "Invalid job id")
 		return
@@ -509,6 +520,8 @@ type jobCancelParams struct {
 // swagger:route POST /job/cancel jobCancel
 //
 // Cancel a running job
+//
+// Cancels the job and all tasks, but does not wait until all tasks are canceled.
 //
 //     Produces:
 //     - application/json

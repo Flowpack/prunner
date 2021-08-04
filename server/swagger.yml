@@ -146,7 +146,8 @@ info:
 paths:
   /job/cancel:
     post:
-      description: Cancel a running job
+      description: Cancels the job and all tasks, but does not wait until all tasks
+        are canceled.
       operationId: jobCancel
       parameters:
       - description: Job id
@@ -165,9 +166,10 @@ paths:
           description: ""
         default:
           description: ""
+      summary: Cancel a running job
   /job/detail:
     get:
-      description: Fetch job details
+      description: Get details about a single job.
       operationId: jobDetail
       parameters:
       - description: Job id
@@ -186,9 +188,11 @@ paths:
           description: ""
         default:
           $ref: '#/responses/jobDetailResponse'
+      summary: Get job details
   /job/logs:
     get:
-      description: Fetch job logs
+      description: Task output for the given job and task will be fetched and returned
+        for STDOUT / STDERR.
       operationId: jobLogs
       parameters:
       - description: Job id
@@ -208,8 +212,15 @@ paths:
       produces:
       - application/json
       responses:
+        "400":
+          $ref: '#/responses/genericErrorResponse'
+        "404":
+          description: ""
+        "500":
+          description: ""
         default:
           $ref: '#/responses/jobLogsResponse'
+      summary: Get job logs
   /pipelines/:
     get:
       description: |-
@@ -232,7 +243,7 @@ paths:
       responses:
         default:
           $ref: '#/responses/pipelinesJobsResponse'
-      summary: Fetch pipelines and jobs
+      summary: Get pipelines and jobs
   /pipelines/schedule:
     post:
       consumes:
@@ -292,9 +303,11 @@ responses:
     schema:
       properties:
         stderr:
+          description: STDERR output of task
           type: string
           x-go-name: Stderr
         stdout:
+          description: STDOUT output of task
           type: string
           x-go-name: Stdout
       type: object
