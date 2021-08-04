@@ -163,7 +163,7 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 			Error:    helper.ErrToStrPtr(t.Error),
 		}
 		taskResults = append(taskResults, res)
-		// Collect if pipelines had a errored task
+		// Collect if job had a errored task
 		// TODO Check if this works if AllowFailure is true!
 		errored = errored || t.Errored
 	}
