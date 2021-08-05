@@ -140,6 +140,7 @@ type jobTask struct {
 	ExitCode int16
 	Errored  bool
 	Error    error
+	Canceled bool
 }
 
 type jobTasks []jobTask
@@ -362,14 +363,15 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 		end := t.End
 		jt.End = &end
 	}
-	jt.Errored = t.Errored
-	jt.Error = t.Error
 	jt.ExitCode = t.ExitCode
 	jt.Skipped = t.Skipped
 
 	// Set canceled flag on the job if a task was canceled through the context
 	if errors.Is(t.Error, context.Canceled) {
-		j.Canceled = true
+		jt.Canceled = true
+	} else {
+		jt.Errored = t.Errored
+		jt.Error = t.Error
 	}
 
 	r.requestPersist()
@@ -392,7 +394,11 @@ func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 		return
 	}
 
-	jt.Status = toStatus(stage.ReadStatus())
+	if jt.Canceled {
+		jt.Status = "canceled"
+	} else {
+		jt.Status = toStatus(stage.ReadStatus())
+	}
 
 	r.requestPersist()
 }
@@ -412,6 +418,11 @@ func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	now := time.Now()
 	job.End = &now
 	job.LastError = err
+
+	// Set canceled flag on the job if a task was canceled through the context
+	if errors.Is(err, context.Canceled) {
+		job.Canceled = true
+	}
 
 	pipeline := job.Pipeline
 	log.
@@ -665,31 +676,28 @@ func (r *PipelineRunner) requestPersist() {
 
 func (r *PipelineRunner) CancelJob(id uuid.UUID) error {
 	r.mx.Lock()
+	defer r.mx.Unlock()
 
 	job, ok := r.jobsByID[id]
 	if !ok {
-		r.mx.Unlock()
 		return ErrJobNotFound
 	}
 
 	if job.Completed {
-		r.mx.Unlock()
 		return errJobAlreadyCompleted
 	}
 
 	if job.Start == nil {
-		r.mx.Unlock()
 		return errJobNotStarted
 	}
 
-	// Unlock mutex before calling cancel to prevent deadlocks from state updates
-	r.mx.Unlock()
+	log.
+		WithField("component", "runner").
+		WithField("pipeline", job.Pipeline).
+		WithField("jobID", job.ID).
+		Debugf("Canceling job")
 
-	// SAFEGUARD: it could happen that a job is cancelled which has never been scheduled.
-	// thus, we need to check for the existence of the job scheduler before cancelling.
-	if job.sched != nil {
-		job.sched.Cancel()
-	}
+	go job.sched.Cancel()
 
 	return nil
 }
