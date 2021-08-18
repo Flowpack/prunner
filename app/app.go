@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/Flowpack/prunner/store"
 	"io"
 	"net/http"
 	"os"
@@ -115,7 +116,7 @@ func appAction(c *cli.Context) error {
 		return errors.Wrap(err, "building output store")
 	}
 
-	store, err := prunner.NewJSONDataStore(path.Join(c.String("data")))
+	store, err := store.NewJSONDataStore(path.Join(c.String("data")))
 	if err != nil {
 		return errors.Wrap(err, "building pipeline runner store")
 	}

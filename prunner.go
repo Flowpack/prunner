@@ -2,6 +2,7 @@ package prunner
 
 import (
 	"context"
+	"github.com/Flowpack/prunner/store"
 	"sort"
 	"sync"
 	"time"
@@ -29,7 +30,7 @@ type PipelineRunner struct {
 	waitListByPipeline map[string][]*PipelineJob
 
 	// store is the implementation for persisting data
-	store dataStore
+	store store.DataStore
 	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see NewPipelineRunner)
 	// externally, call requestPersist()
 	persistRequests chan struct{}
@@ -40,7 +41,7 @@ type PipelineRunner struct {
 }
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
-func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store dataStore) (*PipelineRunner, error) {
+func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store store.DataStore) (*PipelineRunner, error) {
 	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -618,13 +619,13 @@ func (r *PipelineRunner) SaveToStore() {
 		Debugf("Saving job state to data store")
 
 	r.mx.RLock()
-	data := &persistedData{
-		Jobs: make([]persistedJob, 0, len(r.jobsByID)),
+	data := &store.PersistedData{
+		Jobs: make([]store.PersistedJob, 0, len(r.jobsByID)),
 	}
 	for _, job := range r.jobsByID {
-		tasks := make([]persistedTask, len(job.Tasks))
+		tasks := make([]store.PersistedTask, len(job.Tasks))
 		for i, t := range job.Tasks {
-			tasks[i] = persistedTask{
+			tasks[i] = store.PersistedTask{
 				Name:         t.Name,
 				Script:       t.Script,
 				DependsOn:    t.DependsOn,
@@ -639,7 +640,7 @@ func (r *PipelineRunner) SaveToStore() {
 			}
 		}
 
-		data.Jobs = append(data.Jobs, persistedJob{
+		data.Jobs = append(data.Jobs, store.PersistedJob{
 			ID:        job.ID,
 			Pipeline:  job.Pipeline,
 			Completed: job.Completed,
@@ -690,19 +691,22 @@ func (r *PipelineRunner) CancelJob(id uuid.UUID) error {
 	if job.Start == nil {
 		return errJobNotStarted
 	}
-
 	log.
 		WithField("component", "runner").
 		WithField("pipeline", job.Pipeline).
 		WithField("jobID", job.ID).
 		Debugf("Canceling job")
 
-	go job.sched.Cancel()
+	go (func() {
+		if job.sched != nil {
+			job.sched.Cancel()
+		}
+	})()
 
 	return nil
 }
 
-func buildJobFromPersistedJob(pJob persistedJob) *PipelineJob {
+func buildJobFromPersistedJob(pJob store.PersistedJob) *PipelineJob {
 	job := &PipelineJob{
 		ID:        pJob.ID,
 		Pipeline:  pJob.Pipeline,

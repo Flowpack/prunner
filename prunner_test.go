@@ -217,3 +217,61 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 		assert.Nil(t, jt.Error, "task has no error set")
 	}
 }
+
+func TestPipelineRunner_CancelJob_WithStoppedJob(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"long_running": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"sleep": {
+						Script: []string{"sleep 10"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			started = j.Tasks.ByName("sleep").Start != nil
+		})
+		return started
+	}, 1*time.Millisecond, "task started")
+
+	pRunner.SaveToStore()
+
+	// now, we start a NEW prunner instance with the same store,
+	// to ensure we reach an inconsistent state (no taskRunner set).
+	pRunner, err = NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store)
+	require.NoError(t, err)
+
+	pRunner.CancelJob(jobID)
+	// cancelJob triggers a goroutine to do the actual cancel; so we need to wait a bit to see the goroutine fail with a FATAL
+	time.Sleep(1 * time.Second)
+}

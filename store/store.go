@@ -1,4 +1,4 @@
-package prunner
+package store
 
 import (
 	"os"
@@ -12,7 +12,7 @@ import (
 
 var json = jsoniter.ConfigFastest
 
-type persistedJob struct {
+type PersistedJob struct {
 	ID       uuid.UUID
 	Pipeline string
 
@@ -28,10 +28,10 @@ type persistedJob struct {
 	Variables map[string]interface{} `json:",omitempty"`
 	User      string                 `json:",omitempty"`
 
-	Tasks []persistedTask
+	Tasks []PersistedTask
 }
 
-type persistedTask struct {
+type PersistedTask struct {
 	Name         string
 	Script       []string
 	DependsOn    []string   `json:",omitempty"`
@@ -45,43 +45,43 @@ type persistedTask struct {
 	Error        *string    `json:",omitempty"`
 }
 
-type persistedData struct {
-	Jobs []persistedJob
+type PersistedData struct {
+	Jobs []PersistedJob
 }
 
-type dataStore interface {
-	Load() (*persistedData, error)
-	Save(data *persistedData) error
+type DataStore interface {
+	Load() (*PersistedData, error)
+	Save(data *PersistedData) error
 }
 
-type jsonDataStore struct {
+type JsonDataStore struct {
 	path string
 }
 
-var _ dataStore = &jsonDataStore{}
+var _ DataStore = &JsonDataStore{}
 
-func NewJSONDataStore(path string) (*jsonDataStore, error) {
+func NewJSONDataStore(path string) (*JsonDataStore, error) {
 	// Make sure directory for store file exists
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating directory")
 	}
 
-	return &jsonDataStore{
+	return &JsonDataStore{
 		path: path,
 	}, nil
 }
 
-func (j *jsonDataStore) Load() (*persistedData, error) {
+func (j *JsonDataStore) Load() (*PersistedData, error) {
 	f, err := os.Open(path.Join(j.path, "data.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return &persistedData{}, nil
+		return &PersistedData{}, nil
 	} else if err != nil {
 		return nil, errors.Wrap(err, "opening file")
 	}
 	defer f.Close()
 
-	var result persistedData
+	var result PersistedData
 
 	err = json.NewDecoder(f).Decode(&result)
 	if err != nil {
@@ -91,7 +91,7 @@ func (j *jsonDataStore) Load() (*persistedData, error) {
 	return &result, nil
 }
 
-func (j *jsonDataStore) Save(data *persistedData) error {
+func (j *JsonDataStore) Save(data *PersistedData) error {
 	// Use a temporary file for writing data to be crash resistant
 	f, err := os.CreateTemp(j.path, "data.*.tmp")
 	if err != nil {
