@@ -271,7 +271,8 @@ func TestPipelineRunner_CancelJob_WithStoppedJob(t *testing.T) {
 	}, store)
 	require.NoError(t, err)
 
-	pRunner.CancelJob(jobID)
+	err = pRunner.CancelJob(jobID)
+	require.NoError(t, err)
 	// cancelJob triggers a goroutine to do the actual cancel; so we need to wait a bit to see the goroutine fail with a FATAL
 	time.Sleep(1 * time.Second)
 }

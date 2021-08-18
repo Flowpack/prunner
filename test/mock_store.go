@@ -5,14 +5,11 @@ import (
 	"github.com/Flowpack/prunner/store"
 	"github.com/friendsofgo/errors"
 	jsoniter "github.com/json-iterator/go"
-	"sync"
 )
 
 var json = jsoniter.ConfigFastest
 
 type mockStore struct {
-	mx sync.Mutex
-
 	storedBytes []byte
 }
 
