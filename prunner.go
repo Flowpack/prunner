@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/Flowpack/prunner/store"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,6 +32,10 @@ type PipelineRunner struct {
 
 	// store is the implementation for persisting data
 	store store.DataStore
+
+	// outputStore persists the log output. We need the reference here to trigger cleanup logic
+	outputStore taskctl.OutputStore
+
 	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see NewPipelineRunner)
 	// externally, call requestPersist()
 	persistRequests chan struct{}
@@ -41,7 +46,7 @@ type PipelineRunner struct {
 }
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
-func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store store.DataStore) (*PipelineRunner, error) {
+func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store store.DataStore, outputStore taskctl.OutputStore) (*PipelineRunner, error) {
 	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -51,6 +56,7 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		// waitListByPipeline additionally contains all the jobs currently waiting, but not yet started (because concurrency limits have been reached)
 		waitListByPipeline: make(map[string][]*PipelineJob),
 		store:              store,
+		outputStore:        outputStore,
 		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
 		persistRequests:  make(chan struct{}, 1),
 		createTaskRunner: createTaskRunner,
@@ -88,9 +94,9 @@ type PipelineJob struct {
 
 	Completed bool
 	Canceled  bool
-	// Created is the schedule / queue time of the job
+	// Created is the schedule / queue time of the job. Always non-null
 	Created time.Time
-	// Start is the actual start time of the job
+	// Start is the actual start time of the job. Could be nil if not yet started.
 	Start *time.Time
 	// End is the actual end time of the job (can be nil if incomplete)
 	End  *time.Time
@@ -642,6 +648,39 @@ func (r *PipelineRunner) SaveToStore() {
 	data := &store.PersistedData{
 		Jobs: make([]store.PersistedJob, 0, len(r.jobsByID)),
 	}
+
+	// remove jobs whose retention period has expired
+	for _, jobsInPipeline := range r.jobsByPipeline {
+		pipelineJobBy(byCreationTimeDesc).Sort(jobsInPipeline)
+		for i, job := range jobsInPipeline {
+			shouldRemoveJob, removalReason := r.determineIfJobShouldBeRemoved(i, job)
+
+			if shouldRemoveJob {
+				delete(r.jobsByID, job.ID)
+				r.jobsByPipeline[job.Pipeline] = removeJobFromList(r.jobsByPipeline[job.Pipeline], job)
+
+				err := r.outputStore.Remove(job.ID.String())
+				if err != nil {
+					log.
+						WithField("component", "runner").
+						WithField("jobID", job.ID.String()).
+						WithField("pipeline", job.Pipeline).
+						WithField("removalReason", removalReason).
+						WithError(err).
+						Errorf("Removing job - Error removing Logs from Output Store for Job")
+				} else {
+					log.
+						WithField("component", "runner").
+						WithField("jobID", job.ID.String()).
+						WithField("pipeline", job.Pipeline).
+						WithField("removalReason", removalReason).
+						Infof("Removing job")
+				}
+			}
+		}
+	}
+
+	// convert in-memory data to the on-disk representation
 	for _, job := range r.jobsByID {
 		tasks := make([]store.PersistedTask, len(job.Tasks))
 		for i, t := range job.Tasks {
@@ -684,6 +723,48 @@ func (r *PipelineRunner) SaveToStore() {
 			WithError(err).
 			Errorf("Error saving job state to data store")
 	}
+}
+
+// taken from https://stackoverflow.com/a/37335777
+func removeJobFromList(jobs []*PipelineJob, jobToRemove *PipelineJob) []*PipelineJob {
+	for index, job := range jobs {
+		if job.ID == jobToRemove.ID {
+			// taken from https://stackoverflow.com/a/37335777
+			jobs[index] = jobs[len(jobs)-1]
+			return jobs[:len(jobs)-1]
+		}
+	}
+
+	// not found, we return the full list
+	return jobs
+}
+
+// determineIfJobShouldBeRemoved implements the retention period handling.
+func (r *PipelineRunner) determineIfJobShouldBeRemoved(index int, job *PipelineJob) (bool, string) {
+	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
+	if !pipelineDefExists {
+		return true, "Pipeline Definition not found"
+	}
+
+	if job.Start == nil && !job.Canceled {
+		// always keep jobs of waitlist.
+		return false, "keeping job of waitlist"
+	}
+
+	if !job.Completed && !job.Canceled {
+		// always keep jobs which are not yet in some "finished" state.
+		return false, "keeping non-finished jobs"
+	}
+
+	if pipelineDef.RetentionPeriodHours > 0 && -time.Until(job.Created) > time.Duration(pipelineDef.RetentionPeriodHours)*time.Hour {
+		return true, "Retention Period of " + strconv.Itoa(pipelineDef.RetentionPeriodHours) + " hours reached"
+	}
+
+	if pipelineDef.RetentionCount > 0 && index >= pipelineDef.RetentionCount {
+		return true, "Retention Count of " + strconv.Itoa(pipelineDef.RetentionCount) + " reached"
+	}
+
+	return false, ""
 }
 
 func (r *PipelineRunner) requestPersist() {

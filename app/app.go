@@ -131,7 +131,7 @@ func appAction(c *cli.Context) error {
 		taskRunner.Stderr = io.Discard
 
 		return taskRunner
-	}, store)
+	}, store, outputStore)
 	if err != nil {
 		return err
 	}

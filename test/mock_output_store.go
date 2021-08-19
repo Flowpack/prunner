@@ -39,3 +39,7 @@ func (m *mockOutputStore) Reader(jobID string, taskName string, outputName strin
 	// but it should be okay for tests.
 	return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
 }
+
+func (m *mockOutputStore) Remove(jobID string) error {
+	return nil
+}

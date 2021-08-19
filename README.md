@@ -180,6 +180,36 @@ pipelines:
     tasks: # as usual
 ```
 
+
+### Configuring Retention Period
+
+By default, we never delete any runs. For many projects, it is useful to configure this to keep the
+consumed disk space under control. This can be done on a per-pipeline level; using one of the two configuration
+settings `retention_period_hours` and `retention_count`:
+
+As an example, let's configure we only are interested on the last 10 pipeline runs:
+
+```yaml
+pipelines:
+  do_something:
+    retention_count: 10
+    tasks: # as usual
+```
+
+Alternatively, we can delete the data after two days:
+
+```yaml
+pipelines:
+  do_something:
+    retention_period_hours: 48
+    tasks: # as usual
+```
+
+You can also combine the two options. Then, deletion occurs with whatever comes first.
+
+If a pipeline does not exist at all anymore (i.e. if you renamed `do_something` to `another_name` above),
+its persisted logs and task data is removed automatically on saving to disk.
+
 ### Persistent Job State
 
 

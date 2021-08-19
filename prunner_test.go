@@ -2,6 +2,7 @@ package prunner
 
 import (
 	"context"
+	"github.com/apex/log"
 	"github.com/gofrs/uuid"
 	"testing"
 	"time"
@@ -13,6 +14,10 @@ import (
 	"github.com/Flowpack/prunner/taskctl"
 	"github.com/Flowpack/prunner/test"
 )
+
+func init() {
+	log.SetLevel(log.DebugLevel)
+}
 
 func TestJobTasks_sortTasksByDependencies(t *testing.T) {
 	tests := []struct {
@@ -143,7 +148,7 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, nil)
+	}, nil, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("empty_script", ScheduleOpts{})
@@ -176,7 +181,7 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, nil)
+	}, nil, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
@@ -227,7 +232,7 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, store)
+	}, store, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
@@ -245,7 +250,7 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, store)
+	}, store, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	err = pRunner.CancelJob(jobID)
@@ -280,7 +285,7 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, nil)
+	}, nil, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
@@ -329,7 +334,7 @@ func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfCo
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, nil)
+	}, nil, test.NewMockOutputStore())
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
@@ -372,5 +377,177 @@ func waitForCompletedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID)
 			completed = j.Completed
 		})
 		return completed
-	}, 1*time.Millisecond, "job completed")
+	}, 50*time.Millisecond, "job completed")
+}
+
+func TestPipelineRunner_ShouldRemoveOldJobsWhenRetentionPeriodIsConfigured(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithRetentionCount": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency:    1,
+				QueueLimit:     nil,
+				RetentionCount: 1,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"echo a"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
+	require.NoError(t, err)
+
+	assert.Len(t, pRunner.jobsByID, 1, "jobsById internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline["jobWithRetentionCount"], 1, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
+
+	waitForCompletedJob(t, pRunner, job.ID)
+
+	job2, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
+	require.NoError(t, err)
+
+	// this triggers the compraction
+	pRunner.SaveToStore()
+
+	assert.Contains(t, pRunner.jobsByID, job2.ID)
+	// Job 1 has been cleaned up
+	assert.NotContains(t, pRunner.jobsByID, job.ID)
+
+	// we still have one job in the system only (job2)
+	assert.Len(t, pRunner.jobsByID, 1, "jobsById internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline["jobWithRetentionCount"], 1, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
+
+	// now, we instantiate a NEW prunner instance from the same store, ensuring we have again only the right job in there (the latest one). This
+	// tests that we compacted not only the in-memory representation, but also the on-disk one.
+	pRunner2, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+	assert.Len(t, pRunner2.jobsByID, 1, "jobsById internal count mismatch")
+	assert.Len(t, pRunner2.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
+	assert.Len(t, pRunner2.jobsByPipeline["jobWithRetentionCount"], 1, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
+}
+
+func TestPipelineRunner_ShouldNotRemoveStillRunningJobsEvenIfRetentionPeriodIsViolated(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithRetentionCount": {
+				RetentionCount: 1,
+				Concurrency:    100,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"sleep 1"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
+	require.NoError(t, err)
+	job2, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
+	require.NoError(t, err)
+
+	// this triggers the compraction. For running jobs, this should not do anything.
+	pRunner.SaveToStore()
+
+	assert.Len(t, pRunner.jobsByID, 2, "jobsById internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline["jobWithRetentionCount"], 2, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
+
+	waitForCompletedJob(t, pRunner, job.ID)
+	waitForCompletedJob(t, pRunner, job2.ID)
+
+	// this triggers the compraction. As our jobs are finished now, only the job2 should be kept.
+	pRunner.SaveToStore()
+
+	assert.Len(t, pRunner.jobsByID, 1, "jobsById internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
+	assert.Len(t, pRunner.jobsByPipeline["jobWithRetentionCount"], 1, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
+
+	assert.Contains(t, pRunner.jobsByID, job2.ID)
+	// Job 1 has been cleaned up
+	assert.NotContains(t, pRunner.jobsByID, job.ID)
+
+}
+
+func TestPipelineRunner_TimeBasedRetentionPolicyCalculatesCorrectly(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithRetentionCount": {
+				RetentionPeriodHours: 1,
+				Concurrency:          100,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"sleep 1"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	///////////////////
+	// Testcases Follow Here
+	///////////////////
+	ti := time.Now()
+	shouldRemove, reason := pRunner.determineIfJobShouldBeRemoved(0, &PipelineJob{
+		Pipeline: "jobWithRetentionCount",
+		Created:  time.Now(),
+		Start:    &ti,
+		Canceled: true,
+	})
+	require.Equal(t, "", reason)
+	require.False(t, shouldRemove)
+
+	shouldRemove, reason = pRunner.determineIfJobShouldBeRemoved(0, &PipelineJob{
+		Pipeline: "jobWithRetentionCount",
+		Created:  time.Now().Add(-2 * time.Hour),
+		Start:    &ti,
+		Canceled: true,
+	})
+	require.Equal(t, "Retention Period of 1 hours reached", reason)
+	require.True(t, shouldRemove)
+
 }

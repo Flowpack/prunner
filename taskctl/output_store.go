@@ -12,6 +12,7 @@ import (
 type OutputStore interface {
 	Writer(jobID string, taskName string, outputName string) (io.WriteCloser, error)
 	Reader(jobID string, taskName string, outputName string) (io.ReadCloser, error)
+	Remove(jobID string) error
 }
 
 type FileOutputStore struct {
@@ -54,4 +55,8 @@ func (s *FileOutputStore) Reader(jobID string, taskName string, outputName strin
 
 func (s *FileOutputStore) buildPath(jobID string, taskName string, outputName string) string {
 	return path.Join(s.path, jobID, fmt.Sprintf("%s-%s.log", taskName, outputName))
+}
+
+func (s *FileOutputStore) Remove(jobID string) error {
+	return os.RemoveAll(path.Join(s.path, jobID))
 }

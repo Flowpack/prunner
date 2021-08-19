@@ -62,7 +62,7 @@ func TestServer_Pipelines(t *testing.T) {
 
 	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		return &test.MockRunner{}
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 
 	outputStore := test.NewMockOutputStore()
@@ -97,7 +97,7 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 
 	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		return &test.MockRunner{}
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 
 	outputStore := test.NewMockOutputStore()
@@ -145,7 +145,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 
 	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		return &test.MockRunner{}
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 
 	outputStore := test.NewMockOutputStore()
@@ -212,7 +212,7 @@ func TestServer_JobCancel(t *testing.T) {
 				wg.Done()
 			},
 		}
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 
 	outputStore := test.NewMockOutputStore()

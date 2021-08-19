@@ -9,7 +9,7 @@ func WaitForCondition(t *testing.T, f func() bool, wait time.Duration, msg strin
 	t.Helper()
 	var d = 0 * time.Second
 	for {
-		if d > 1*time.Second {
+		if d > 2*time.Second {
 			t.Fatalf("Timed out waiting for condition: %s", msg)
 		}
 		if f() {

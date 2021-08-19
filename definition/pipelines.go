@@ -27,6 +27,10 @@ type PipelineDef struct {
 	// predecessors have not failed. false by default; so by default, if the first job aborts, all others are terminated as well.
 	ContinueRunningTasksAfterFailure bool `yaml:"continue_running_tasks_after_failure"`
 
+	RetentionPeriodHours int `yaml:"retention_period_hours"`
+
+	RetentionCount int `yaml:"retention_count"`
+
 	Tasks map[string]TaskDef `yaml:"tasks"`
 
 	// SourcePath stores the source path where the pipeline was defined
