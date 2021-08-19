@@ -23,6 +23,10 @@ type PipelineDef struct {
 	// QueueStrategy to use when adding jobs to the queue (defaults to append)
 	QueueStrategy QueueStrategy `yaml:"queue_strategy"`
 
+	// ContinueRunningTasksAfterFailure should be set to true if you want to continue working through all jobs whose
+	// predecessors have not failed. false by default; so by default, if the first job aborts, all others are terminated as well.
+	ContinueRunningTasksAfterFailure bool `yaml:"continue_running_tasks_after_failure"`
+
 	Tasks map[string]TaskDef `yaml:"tasks"`
 
 	// SourcePath stores the source path where the pipeline was defined

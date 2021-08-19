@@ -254,6 +254,107 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 	time.Sleep(1 * time.Second)
 }
 
+func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"long_running_with_error": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"err": {
+						Script: []string{"sleep 1; exit 1"},
+					},
+					"sleep": {
+						Script: []string{"sleep 2"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, nil)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+	waitForStartedJob(t, pRunner, jobID)
+
+	// we wait for the "err" task to fail.
+	test.WaitForCondition(t, func() bool {
+		var errored bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			errored = j.Tasks.ByName("err").Errored
+		})
+		return errored
+	}, 50*time.Millisecond, "first task errored as expected")
+	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
+	assert.True(t, job.Tasks.ByName("sleep").Canceled, "sleep task should be cancelled")
+}
+
+func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfConfigured(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"long_running_with_error": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency:                      1,
+				QueueLimit:                       nil,
+				ContinueRunningTasksAfterFailure: true,
+				Tasks: map[string]definition.TaskDef{
+					"err": {
+						Script: []string{"sleep 1; exit 1"},
+					},
+					"sleep": {
+						Script: []string{"sleep 2"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, nil)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+	waitForStartedJob(t, pRunner, jobID)
+
+	// we wait for the "err" task to fail.
+	test.WaitForCondition(t, func() bool {
+		var errored bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			errored = j.Tasks.ByName("err").Errored
+		})
+		return errored
+	}, 50*time.Millisecond, "first task errored as expected")
+
+	time.Sleep(3 * time.Second)
+	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
+	assert.Equal(t, "done", job.Tasks.ByName("sleep").Status, "sleep task should be done until the end")
+	// TODO: I am not sure if the state here is correct
+	assert.True(t, job.Completed, "job should be marked as completed")
+	assert.False(t, job.Canceled, "job should not be marked as canceled")
+}
+
 func waitForStartedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID) {
 	test.WaitForCondition(t, func() bool {
 		var started bool

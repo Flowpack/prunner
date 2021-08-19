@@ -164,6 +164,22 @@ So the example above means:
 This is especially helpful for stuff like incremental content rendering, when you need
 to ensure that the system converges to the last known state.
 
+
+### Disabling Fail-Fast Behavior
+
+By default, if a task in a pipeline fails, all other concurrently running tasks are directly aborted.
+Sometimes this is not desirable, e.g. if certain deployment tasks should continue running if already started.
+
+For now, this is not configurable on a per-task basis, but only on a per-pipeline basis, by setting
+`continue_running_tasks_after_failure` to `true`:
+
+```yaml
+pipelines:
+  do_something:
+    continue_running_tasks_after_failure: true
+    tasks: # as usual
+```
+
 ### Persistent Job State
 
 

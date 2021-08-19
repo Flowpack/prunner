@@ -347,8 +347,8 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 
 	jobIDString := t.Variables.Get(taskctl.JobIDVariableName).(string)
 	jobID, _ := uuid.FromString(jobIDString)
-	j, ok := r.jobsByID[jobID]
-	if !ok {
+	j, found := r.jobsByID[jobID]
+	if !found {
 		return
 	}
 
@@ -373,6 +373,26 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	} else {
 		jt.Errored = t.Errored
 		jt.Error = t.Error
+	}
+
+	// if the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is set to FALSE),
+	// then we directly abort all other tasks of the job.
+	if t.Errored {
+		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
+		if found {
+			if !pipelineDef.ContinueRunningTasksAfterFailure {
+				log.
+					WithField("component", "runner").
+					WithField("jobID", jobIDString).
+					WithField("pipeline", j.Pipeline).
+					WithField("failedTaskName", t.Name).
+					Debug("Task failed - cancelling all other tasks of the job")
+				// we directly call cancelJobInternal; and not CancelJob, because in this method,
+				// we already have the mutex (r.mx) locked - and we cannot lock it twice (otherwise
+				// we'd have a deadlock)
+				_ = r.cancelJobInternal(jobID)
+			}
+		}
 	}
 
 	r.requestPersist()
@@ -679,6 +699,10 @@ func (r *PipelineRunner) CancelJob(id uuid.UUID) error {
 	r.mx.Lock()
 	defer r.mx.Unlock()
 
+	return r.cancelJobInternal(id)
+}
+
+func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 	job, ok := r.jobsByID[id]
 	if !ok {
 		return ErrJobNotFound
