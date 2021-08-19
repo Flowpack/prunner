@@ -2,6 +2,7 @@ package prunner
 
 import (
 	"context"
+	"github.com/gofrs/uuid"
 	"testing"
 	"time"
 
@@ -148,13 +149,7 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	job, err := pRunner.ScheduleAsync("empty_script", ScheduleOpts{})
 	require.NoError(t, err)
 
-	test.WaitForCondition(t, func() bool {
-		var completed bool
-		_ = pRunner.ReadJob(job.ID, func(j *PipelineJob) {
-			completed = j.Completed
-		})
-		return completed
-	}, 50*time.Millisecond, "job completed")
+	waitForCompletedJob(t, pRunner, job.ID)
 }
 
 func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
@@ -189,24 +184,12 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 
 	jobID := job.ID
 
-	test.WaitForCondition(t, func() bool {
-		var started bool
-		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			started = j.Tasks.ByName("sleep").Start != nil
-		})
-		return started
-	}, 1*time.Millisecond, "task started")
+	waitForStartedJob(t, pRunner, jobID)
 
 	err = pRunner.CancelJob(jobID)
 	require.NoError(t, err)
 
-	test.WaitForCondition(t, func() bool {
-		var completed bool
-		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			completed = j.Completed
-		})
-		return completed
-	}, 1*time.Millisecond, "job completed")
+	waitForCompletedJob(t, pRunner, jobID)
 
 	assert.True(t, job.Canceled, "job was marked as canceled")
 	jt := job.Tasks.ByName("sleep")
@@ -218,7 +201,7 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 	}
 }
 
-func TestPipelineRunner_CancelJob_WithStoppedJob(t *testing.T) {
+func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *testing.T) {
 	var defs = &definition.PipelinesDef{
 		Pipelines: map[string]definition.PipelineDef{
 			"long_running": {
@@ -252,13 +235,7 @@ func TestPipelineRunner_CancelJob_WithStoppedJob(t *testing.T) {
 
 	jobID := job.ID
 
-	test.WaitForCondition(t, func() bool {
-		var started bool
-		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			started = j.Tasks.ByName("sleep").Start != nil
-		})
-		return started
-	}, 1*time.Millisecond, "task started")
+	waitForStartedJob(t, pRunner, jobID)
 
 	pRunner.SaveToStore()
 
@@ -275,4 +252,24 @@ func TestPipelineRunner_CancelJob_WithStoppedJob(t *testing.T) {
 	require.NoError(t, err)
 	// cancelJob triggers a goroutine to do the actual cancel; so we need to wait a bit to see the goroutine fail with a FATAL
 	time.Sleep(1 * time.Second)
+}
+
+func waitForStartedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID) {
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			started = j.Tasks.ByName("sleep").Start != nil
+		})
+		return started
+	}, 1*time.Millisecond, "task started")
+}
+
+func waitForCompletedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID) {
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
+	}, 1*time.Millisecond, "job completed")
 }
