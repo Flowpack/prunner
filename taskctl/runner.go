@@ -38,7 +38,7 @@ type TaskRunner struct {
 	cancelFunc  context.CancelFunc
 	cancelMutex sync.RWMutex
 	canceling   bool
-	doneCh      chan struct{}
+	wg          sync.WaitGroup
 
 	compiler *runner.TaskCompiler
 
@@ -66,7 +66,6 @@ func NewTaskRunner(outputStore OutputStore, opts ...Opts) (*TaskRunner, error) {
 		Stderr:       os.Stderr,
 		variables:    variables.NewVariables(),
 		env:          variables.NewVariables(),
-		doneCh:       make(chan struct{}, 1),
 
 		outputStore: outputStore,
 	}
@@ -105,20 +104,9 @@ func (r *TaskRunner) SetVariables(vars variables.Container) *TaskRunner {
 // Run run provided task.
 // TaskRunner first compiles task into linked list of Jobs, then passes those jobs to Executor
 func (r *TaskRunner) Run(t *task.Task) error {
-	defer func() {
-		r.cancelMutex.RLock()
-		if r.canceling {
-			// WORKAROUND: we need to ensure we only call close() ONCE
-			// on r.doneCh. Because r.canceling is ONLY read to protect
-			// the channel closing here, it is safe to reset it to prevent
-			// closing the channel twice.
-			// I was not able to test this with a Unit Test, but the error
-			// occured multiple times in production. For a trace, see https://github.com/Flowpack/prunner/issues/8
-			r.canceling = false
-			close(r.doneCh)
-		}
-		r.cancelMutex.RUnlock()
-	}()
+	// Keep track of running tasks for graceful shutdown and waiting until all tasks are canceled
+	r.wg.Add(1)
+	defer r.wg.Done()
 
 	if err := r.ctx.Err(); err != nil {
 		return err
@@ -230,7 +218,8 @@ func (r *TaskRunner) Cancel() {
 		r.cancelFunc()
 	}
 	r.cancelMutex.Unlock()
-	<-r.doneCh
+	// Wait until all running tasks are canceled and return
+	r.wg.Wait()
 }
 
 // Finish makes cleanup tasks over contexts

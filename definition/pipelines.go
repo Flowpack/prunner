@@ -2,6 +2,7 @@ package definition
 
 import (
 	"strings"
+	"time"
 
 	"github.com/friendsofgo/errors"
 )
@@ -22,19 +23,46 @@ type PipelineDef struct {
 	QueueLimit *int `yaml:"queue_limit"`
 	// QueueStrategy to use when adding jobs to the queue (defaults to append)
 	QueueStrategy QueueStrategy `yaml:"queue_strategy"`
+	// StartDelay will delay the start of a job if the value is greater than zero (defaults to 0)
+	StartDelay time.Duration `yaml:"start_delay"`
 
 	// ContinueRunningTasksAfterFailure should be set to true if you want to continue working through all jobs whose
 	// predecessors have not failed. false by default; so by default, if the first job aborts, all others are terminated as well.
 	ContinueRunningTasksAfterFailure bool `yaml:"continue_running_tasks_after_failure"`
 
-	RetentionPeriodHours int `yaml:"retention_period_hours"`
-
-	RetentionCount int `yaml:"retention_count"`
+	RetentionPeriod time.Duration `yaml:"retention_period"`
+	RetentionCount  int           `yaml:"retention_count"`
 
 	Tasks map[string]TaskDef `yaml:"tasks"`
 
 	// SourcePath stores the source path where the pipeline was defined
 	SourcePath string
+}
+
+func (d PipelineDef) validate() error {
+	if d.Concurrency <= 0 {
+		return errors.New("concurrency must be greater than 0")
+	}
+	if d.QueueLimit != nil && *d.QueueLimit < 0 {
+		return errors.New("queue_limit must not be negative")
+	}
+	if d.StartDelay < 0 {
+		return errors.New("start_delay must not be negative")
+	}
+	if d.StartDelay > 0 && d.QueueLimit != nil && *d.QueueLimit == 0 {
+		return errors.New("start_delay needs queue_limit > 0")
+	}
+
+	for taskName, taskDef := range d.Tasks {
+		for _, dependentTask := range taskDef.DependsOn {
+			_, exists := d.Tasks[dependentTask]
+			if !exists {
+				return errors.Errorf("missing task %q referenced in depends_on of task %q", dependentTask, taskName)
+			}
+		}
+	}
+
+	return nil
 }
 
 type QueueStrategy int
@@ -79,6 +107,16 @@ func (d *PipelinesDef) setDefaults() {
 			d.Pipelines[pipeline] = pipelineDef
 		}
 	}
+}
+
+func (d *PipelinesDef) Validate() error {
+	for pipeline, pipelineDef := range d.Pipelines {
+		err := pipelineDef.validate()
+		if err != nil {
+			return errors.Wrapf(err, "invalid pipeline definition %q", pipeline)
+		}
+	}
+	return nil
 }
 
 type KeyValue map[string]string

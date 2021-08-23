@@ -2,10 +2,14 @@ package prunner
 
 import (
 	"context"
-	"github.com/apex/log"
-	"github.com/gofrs/uuid"
+	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/apex/log"
+	"github.com/gofrs/uuid"
+	"github.com/taskctl/taskctl/pkg/task"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,7 +193,7 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 
 	jobID := job.ID
 
-	waitForStartedJob(t, pRunner, jobID)
+	waitForStartedJobTask(t, pRunner, jobID, "sleep")
 
 	err = pRunner.CancelJob(jobID)
 	require.NoError(t, err)
@@ -227,26 +231,13 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 	defer cancel()
 
 	store := test.NewMockStore()
+	store.Set([]byte(`{"Jobs":[{"ID":"72b01fe2-c090-499f-a7b4-a4ff530bf11b","Pipeline":"long_running","Created":"2021-08-23T15:41:09.37212+02:00","Start":"2021-08-23T15:41:09.372149+02:00","Tasks":[{"Name":"sleep","Script":["sleep 10"],"Status":"running","Start":"2021-08-23T15:41:09.372455+02:00","ExitCode":-1}]}]}`))
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
-		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
-		return taskRunner
-	}, store, test.NewMockOutputStore())
-	require.NoError(t, err)
-
-	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
-	require.NoError(t, err)
-
-	jobID := job.ID
-
-	waitForStartedJob(t, pRunner, jobID)
-
-	pRunner.SaveToStore()
+	jobID := uuid.FromStringOrNil("72b01fe2-c090-499f-a7b4-a4ff530bf11b")
 
 	// now, we start a NEW prunner instance with the same store,
 	// to ensure we reach an inconsistent state (no taskRunner set).
-	pRunner, err = NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -255,8 +246,9 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 
 	err = pRunner.CancelJob(jobID)
 	require.NoError(t, err)
-	// cancelJob triggers a goroutine to do the actual cancel; so we need to wait a bit to see the goroutine fail with a FATAL
-	time.Sleep(1 * time.Second)
+
+	// Wait until the cancel operation is done
+	pRunner.wg.Wait()
 }
 
 func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t *testing.T) {
@@ -268,10 +260,10 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 				QueueLimit:  nil,
 				Tasks: map[string]definition.TaskDef{
 					"err": {
-						Script: []string{"sleep 1; exit 1"},
+						Script: []string{"exit 1"},
 					},
-					"sleep": {
-						Script: []string{"sleep 2"},
+					"ok": {
+						Script: []string{"do_something_long"},
 					},
 				},
 				SourcePath: "fixtures",
@@ -281,29 +273,42 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
-		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
-		return taskRunner
-	}, nil, test.NewMockOutputStore())
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) error {
+				if t.Name == "err" {
+					t.Errored = true
+					t.Error = errors.New("exit 1")
+				}
+
+				if t.Name == "ok" {
+					// Wait until cancel occurs and simulate a canceled error from this task
+					<-ctx.Done()
+
+					t.Errored = true
+					t.Error = context.Canceled
+				}
+
+				return t.Error
+			},
+			OnCancel: func() {
+				// We need to actively cancel the context here
+				cancel()
+			},
+		}
+	}, nil, nil)
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
 	require.NoError(t, err)
 
 	jobID := job.ID
-	waitForStartedJob(t, pRunner, jobID)
 
-	// we wait for the "err" task to fail.
-	test.WaitForCondition(t, func() bool {
-		var errored bool
-		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			errored = j.Tasks.ByName("err").Errored
-		})
-		return errored
-	}, 50*time.Millisecond, "first task errored as expected")
+	waitForCompletedJob(t, pRunner, jobID)
+
 	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
-	assert.True(t, job.Tasks.ByName("sleep").Canceled, "sleep task should be cancelled")
+	assert.True(t, job.Tasks.ByName("ok").Canceled, "ok task should be cancelled")
 }
 
 func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfConfigured(t *testing.T) {
@@ -316,10 +321,10 @@ func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfCo
 				ContinueRunningTasksAfterFailure: true,
 				Tasks: map[string]definition.TaskDef{
 					"err": {
-						Script: []string{"sleep 1; exit 1"},
+						Script: []string{"exit 1"},
 					},
-					"sleep": {
-						Script: []string{"sleep 2"},
+					"ok": {
+						Script: []string{"do_something_longer"},
 					},
 				},
 				SourcePath: "fixtures",
@@ -330,54 +335,65 @@ func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfCo
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var canceled bool
+
 	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
-		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
-		return taskRunner
-	}, nil, test.NewMockOutputStore())
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) error {
+				if t.Name == "err" {
+					t.Errored = true
+					t.Error = errors.New("exit 1")
+					return t.Error
+				}
+
+				return nil
+			},
+			OnCancel: func() {
+				canceled = true
+			},
+		}
+	}, nil, nil)
 	require.NoError(t, err)
 
 	job, err := pRunner.ScheduleAsync("long_running_with_error", ScheduleOpts{})
 	require.NoError(t, err)
 
-	jobID := job.ID
-	waitForStartedJob(t, pRunner, jobID)
+	waitForCompletedJob(t, pRunner, job.ID)
 
-	// we wait for the "err" task to fail.
-	test.WaitForCondition(t, func() bool {
-		var errored bool
-		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			errored = j.Tasks.ByName("err").Errored
-		})
-		return errored
-	}, 50*time.Millisecond, "first task errored as expected")
+	require.False(t, canceled, "task runner should not be canceled")
 
-	time.Sleep(3 * time.Second)
 	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
-	assert.Equal(t, "done", job.Tasks.ByName("sleep").Status, "sleep task should be done until the end")
-	// TODO: I am not sure if the state here is correct
+	assert.Equal(t, "done", job.Tasks.ByName("ok").Status, "ok task should be done until the end")
 	assert.True(t, job.Completed, "job should be marked as completed")
 	assert.False(t, job.Canceled, "job should not be marked as canceled")
+	assert.NotNil(t, job.LastError, "job should have last error")
 }
 
-func waitForStartedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID) {
+func waitForStartedJobTask(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID, taskName string) {
+	t.Helper()
+
 	test.WaitForCondition(t, func() bool {
 		var started bool
 		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
-			started = j.Tasks.ByName("sleep").Start != nil
+			tsk := j.Tasks.ByName(taskName)
+			if tsk != nil {
+				started = tsk.Start != nil
+			}
 		})
 		return started
 	}, 1*time.Millisecond, "task started")
 }
 
 func waitForCompletedJob(t *testing.T, pRunner *PipelineRunner, jobID uuid.UUID) {
+	t.Helper()
+
 	test.WaitForCondition(t, func() bool {
 		var completed bool
 		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
 			completed = j.Completed
 		})
 		return completed
-	}, 50*time.Millisecond, "job completed")
+	}, 1*time.Millisecond, "job completed")
 }
 
 func TestPipelineRunner_ShouldRemoveOldJobsWhenRetentionPeriodIsConfigured(t *testing.T) {
@@ -465,30 +481,43 @@ func TestPipelineRunner_ShouldNotRemoveStillRunningJobsEvenIfRetentionPeriodIsVi
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var wg sync.WaitGroup
+
 	store := test.NewMockStore()
 	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
-		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
-		return taskRunner
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) error {
+				// Wait until wait group is marked as done
+				wg.Wait()
+				return nil
+			},
+		}
 	}, store, test.NewMockOutputStore())
 	require.NoError(t, err)
+
+	// Increment wait count
+	wg.Add(1)
 
 	job, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
 	require.NoError(t, err)
 	job2, err := pRunner.ScheduleAsync("jobWithRetentionCount", ScheduleOpts{})
 	require.NoError(t, err)
 
-	// this triggers the compraction. For running jobs, this should not do anything.
+	// This triggers the compaction. For running jobs, this should not do anything.
 	pRunner.SaveToStore()
 
 	assert.Len(t, pRunner.jobsByID, 2, "jobsById internal count mismatch")
 	assert.Len(t, pRunner.jobsByPipeline, 1, "jobsByPipeline internal count mismatch")
 	assert.Len(t, pRunner.jobsByPipeline["jobWithRetentionCount"], 2, "jobsByPipeline[jobWithRetentionCount] internal count mismatch")
 
+	// Mark jobs as finished - finishes tasks in mock runner
+	wg.Done()
+
+	// Wait until jobs are seen as finished
 	waitForCompletedJob(t, pRunner, job.ID)
 	waitForCompletedJob(t, pRunner, job2.ID)
 
-	// this triggers the compraction. As our jobs are finished now, only the job2 should be kept.
+	// This triggers the compaction. As our jobs are finished now, only the job2 should be kept.
 	pRunner.SaveToStore()
 
 	assert.Len(t, pRunner.jobsByID, 1, "jobsById internal count mismatch")
@@ -498,18 +527,17 @@ func TestPipelineRunner_ShouldNotRemoveStillRunningJobsEvenIfRetentionPeriodIsVi
 	assert.Contains(t, pRunner.jobsByID, job2.ID)
 	// Job 1 has been cleaned up
 	assert.NotContains(t, pRunner.jobsByID, job.ID)
-
 }
 
 func TestPipelineRunner_TimeBasedRetentionPolicyCalculatesCorrectly(t *testing.T) {
 	var defs = &definition.PipelinesDef{
 		Pipelines: map[string]definition.PipelineDef{
 			"jobWithRetentionCount": {
-				RetentionPeriodHours: 1,
-				Concurrency:          100,
+				RetentionPeriod: 1 * time.Hour,
+				Concurrency:     100,
 				Tasks: map[string]definition.TaskDef{
 					"echo": {
-						Script: []string{"sleep 1"},
+						Script: []string{"echo Test"},
 					},
 				},
 				SourcePath: "fixtures",
@@ -520,12 +548,9 @@ func TestPipelineRunner_TimeBasedRetentionPolicyCalculatesCorrectly(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store := test.NewMockStore()
 	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
-		// Use a real runner here to test the actual processing of a task.Task
-		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
-		return taskRunner
-	}, store, test.NewMockOutputStore())
+		return &test.MockRunner{}
+	}, nil, nil)
 	require.NoError(t, err)
 
 	///////////////////
@@ -547,7 +572,85 @@ func TestPipelineRunner_TimeBasedRetentionPolicyCalculatesCorrectly(t *testing.T
 		Start:    &ti,
 		Canceled: true,
 	})
-	require.Equal(t, "Retention Period of 1 hours reached", reason)
+	require.Equal(t, "Retention period of 1h0m0s reached", reason)
 	require.True(t, shouldRemove)
+}
 
+func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSingleJob(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithStartDelay": {
+				Concurrency:   1,
+				StartDelay:    50 * time.Millisecond,
+				QueueLimit:    intPtr(1),
+				QueueStrategy: definition.QueueStrategyReplace,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"echo Test"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+	require.NoError(t, defs.Validate())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) error {
+				return nil
+			},
+		}
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			started = j.Start != nil
+		})
+		return !started
+	}, 1*time.Millisecond, "job is not started (queued)")
+
+	// This job should replace the first job
+	job2, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	test.WaitForCondition(t, func() bool {
+		var canceled bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			canceled = j.Canceled
+		})
+		return canceled
+	}, 1*time.Millisecond, "job is canceled")
+
+	job2ID := job2.ID
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
+			started = j.Start != nil
+		})
+		return !started
+	}, 1*time.Millisecond, "job2 is not started (queued)")
+
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
+			started = j.Start != nil
+		})
+		return started
+	}, 1*time.Millisecond, "job2 is started")
+
+}
+
+func intPtr(i int) *int {
+	return &i
 }
