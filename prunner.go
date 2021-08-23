@@ -160,15 +160,6 @@ type jobTasks []jobTask
 
 type scheduleAction int
 
-func (a scheduleAction) in(actions ...scheduleAction) bool {
-	for _, action := range actions {
-		if a == action {
-			return true
-		}
-	}
-	return false
-}
-
 const (
 	scheduleActionStart scheduleAction = iota
 	scheduleActionQueue
