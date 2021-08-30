@@ -2,11 +2,12 @@ package prunner
 
 import (
 	"context"
-	"github.com/Flowpack/prunner/store"
+	"fmt"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
+
+	"github.com/Flowpack/prunner/store"
 
 	"github.com/apex/log"
 	"github.com/friendsofgo/errors"
@@ -43,6 +44,9 @@ type PipelineRunner struct {
 	// Mutex for reading or writing jobs and job state
 	mx               sync.RWMutex
 	createTaskRunner func() taskctl.Runner
+
+	// Wait group for waiting for asynchronous operations like job.Cancel
+	wg sync.WaitGroup
 }
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
@@ -88,9 +92,10 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 // PipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of PipelineRunner),
 // or currently running (jobsByID / jobsByPipeline in PipelineRunner)
 type PipelineJob struct {
-	ID        uuid.UUID
-	Pipeline  string
-	Variables map[string]interface{}
+	ID         uuid.UUID
+	Pipeline   string
+	Variables  map[string]interface{}
+	StartDelay time.Duration
 
 	Completed bool
 	Canceled  bool
@@ -107,6 +112,7 @@ type PipelineJob struct {
 
 	sched      *taskctl.Scheduler
 	taskRunner runner.Runner
+	startTimer *time.Timer
 }
 
 func (j *PipelineJob) isRunning() bool {
@@ -157,6 +163,7 @@ type scheduleAction int
 const (
 	scheduleActionStart scheduleAction = iota
 	scheduleActionQueue
+	scheduleActionQueueDelay
 	scheduleActionReplace
 	scheduleActionNoQueue
 	scheduleActionQueueFull
@@ -194,16 +201,24 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 	defer r.requestPersist()
 
 	job := &PipelineJob{
-		ID:        id,
-		Pipeline:  pipeline,
-		Created:   time.Now(),
-		Tasks:     buildJobTasks(pipelineDef.Tasks),
-		Variables: opts.Variables,
-		User:      opts.User,
+		ID:         id,
+		Pipeline:   pipeline,
+		Created:    time.Now(),
+		Tasks:      buildJobTasks(pipelineDef.Tasks),
+		Variables:  opts.Variables,
+		User:       opts.User,
+		StartDelay: pipelineDef.StartDelay,
 	}
 
 	r.jobsByID[id] = job
 	r.jobsByPipeline[pipeline] = append(r.jobsByPipeline[pipeline], job)
+
+	if job.StartDelay > 0 {
+		// A delayed job is a job on the wait list that is started by a function after a delay
+		job.startTimer = time.AfterFunc(job.StartDelay, func() {
+			r.StartDelayedJob(id)
+		})
+	}
 
 	switch action {
 	case scheduleActionQueue:
@@ -221,6 +236,11 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 		waitList := r.waitListByPipeline[pipeline]
 		previousJob := waitList[len(waitList)-1]
 		previousJob.Canceled = true
+		if previousJob.startTimer != nil {
+			// Stop timer and unset reference for clean up
+			previousJob.startTimer.Stop()
+			previousJob.startTimer = nil
+		}
 		waitList[len(waitList)-1] = job
 
 		log.
@@ -324,7 +344,8 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 		log.
 			WithError(err).
 			WithField("jobID", job.ID).
-			WithField("pipeline", job.ID)
+			WithField("pipeline", job.Pipeline).
+			Error("Failed to build pipeline graph")
 
 		job.LastError = err
 		job.Canceled = true
@@ -468,9 +489,15 @@ func (r *PipelineRunner) startJobsOnWaitList(pipeline string) {
 	// Check wait list if another job is queued
 	waitList := r.waitListByPipeline[pipeline]
 
-	// Schedule as many jobs as are schedulable
-	for len(waitList) > 0 && r.resolveScheduleAction(pipeline) == scheduleActionStart {
+	// Schedule as many jobs as are schedulable (also process if the schedule action is start delay and check individual jobs if they can be started)
+	for len(waitList) > 0 && r.resolveDequeueJobAction(waitList[0]) == scheduleActionStart {
 		queuedJob := waitList[0]
+		// Queued job has a start delay timer set - wait for it to fire
+		if queuedJob.startTimer != nil {
+			// TODO We need to check if we rather need to skip only this job and continue to process other jobs on the queue
+			break
+		}
+
 		waitList = waitList[1:]
 
 		r.startJob(queuedJob)
@@ -547,8 +574,10 @@ func (r *PipelineRunner) runningJobsCount(pipeline string) int {
 func (r *PipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	pipelineDef := r.defs.Pipelines[pipeline]
 
+	// If a start delay is set, we will always queue the job, otherwise we check if the number of running jobs
+	// exceed the maximum concurrency
 	runningJobsCount := r.runningJobsCount(pipeline)
-	if runningJobsCount >= pipelineDef.Concurrency {
+	if runningJobsCount >= pipelineDef.Concurrency || pipelineDef.StartDelay > 0 {
 		// Check if jobs should be queued if concurrency factor is exceeded
 		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
 			return scheduleActionNoQueue
@@ -571,6 +600,15 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	return scheduleActionStart
 }
 
+func (r *PipelineRunner) resolveDequeueJobAction(job *PipelineJob) scheduleAction {
+	// Start the job if it had a start delay but the timer finished
+	if job.StartDelay > 0 && job.startTimer == nil {
+		return scheduleActionStart
+	}
+
+	return r.resolveScheduleAction(job.Pipeline)
+}
+
 func (r *PipelineRunner) isSchedulable(pipeline string) bool {
 	action := r.resolveScheduleAction(pipeline)
 	switch action {
@@ -579,6 +617,8 @@ func (r *PipelineRunner) isSchedulable(pipeline string) bool {
 	case scheduleActionQueue:
 		fallthrough
 	case scheduleActionStart:
+		return true
+	case scheduleActionQueueDelay:
 		return true
 	}
 	return false
@@ -649,10 +689,14 @@ func (r *PipelineRunner) SaveToStore() {
 		Jobs: make([]store.PersistedJob, 0, len(r.jobsByID)),
 	}
 
-	// remove jobs whose retention period has expired
+	// Remove jobs whose retention period has expired
 	for _, jobsInPipeline := range r.jobsByPipeline {
-		pipelineJobBy(byCreationTimeDesc).Sort(jobsInPipeline)
-		for i, job := range jobsInPipeline {
+		// Make a copy of the slice before sorting to prevent data races (we only have a read lock here)
+		sortedJobsInPipeline := make([]*PipelineJob, len(jobsInPipeline))
+		copy(sortedJobsInPipeline, jobsInPipeline)
+		pipelineJobBy(byCreationTimeDesc).Sort(sortedJobsInPipeline)
+
+		for i, job := range sortedJobsInPipeline {
 			shouldRemoveJob, removalReason := r.determineIfJobShouldBeRemoved(i, job)
 
 			if shouldRemoveJob {
@@ -747,21 +791,21 @@ func (r *PipelineRunner) determineIfJobShouldBeRemoved(index int, job *PipelineJ
 	}
 
 	if job.Start == nil && !job.Canceled {
-		// always keep jobs of waitlist.
-		return false, "keeping job of waitlist"
+		// always keep jobs on wait list
+		return false, "Keeping job on wait list"
 	}
 
 	if !job.Completed && !job.Canceled {
-		// always keep jobs which are not yet in some "finished" state.
-		return false, "keeping non-finished jobs"
+		// always keep jobs which are not yet in some "finished" state
+		return false, "Keeping non-finished job"
 	}
 
-	if pipelineDef.RetentionPeriodHours > 0 && -time.Until(job.Created) > time.Duration(pipelineDef.RetentionPeriodHours)*time.Hour {
-		return true, "Retention Period of " + strconv.Itoa(pipelineDef.RetentionPeriodHours) + " hours reached"
+	if pipelineDef.RetentionPeriod > 0 && time.Since(job.Created) > pipelineDef.RetentionPeriod {
+		return true, fmt.Sprintf("Retention period of %s reached", pipelineDef.RetentionPeriod.String())
 	}
 
 	if pipelineDef.RetentionCount > 0 && index >= pipelineDef.RetentionCount {
-		return true, "Retention Count of " + strconv.Itoa(pipelineDef.RetentionCount) + " reached"
+		return true, fmt.Sprintf("Retention count of %d reached", pipelineDef.RetentionCount)
 	}
 
 	return false, ""
@@ -789,6 +833,11 @@ func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 		return ErrJobNotFound
 	}
 
+	if job.Canceled {
+		// Canceling an already canceled job is not an error
+		return nil
+	}
+
 	if job.Completed {
 		return errJobAlreadyCompleted
 	}
@@ -796,19 +845,56 @@ func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 	if job.Start == nil {
 		return errJobNotStarted
 	}
+
 	log.
 		WithField("component", "runner").
 		WithField("pipeline", job.Pipeline).
 		WithField("jobID", job.ID).
 		Debugf("Canceling job")
 
+	if job.sched == nil {
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			Warnf("Failed assertion: scheduler of job is nil")
+		return nil
+	}
+
+	cancelFunc := job.sched.Cancel
+
+	r.wg.Add(1)
 	go (func() {
-		if job.sched != nil {
-			job.sched.Cancel()
-		}
+		cancelFunc()
+		r.wg.Done()
 	})()
 
 	return nil
+}
+
+func (r *PipelineRunner) StartDelayedJob(id uuid.UUID) {
+	r.mx.Lock()
+	defer r.mx.Unlock()
+
+	job, ok := r.jobsByID[id]
+	if !ok {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", id).
+			Error("Failed to find job to start after delay")
+		return
+	}
+
+	if job.Canceled {
+		return
+	}
+
+	// Unset start timer since it is done to allow immediate processing of job
+	// (e.g. if it gets eligible to execute after some other job finished)
+	job.startTimer = nil
+
+	// Start pending jobs on wait list (should run delayed job)
+	r.startJobsOnWaitList(job.Pipeline)
 }
 
 func buildJobFromPersistedJob(pJob store.PersistedJob) *PipelineJob {

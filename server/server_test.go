@@ -205,8 +205,9 @@ func TestServer_JobCancel(t *testing.T) {
 
 	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
 		return &test.MockRunner{
-			OnRun: func(t *task.Task) {
+			OnRun: func(t *task.Task) error {
 				wg.Wait()
+				return nil
 			},
 			OnCancel: func() {
 				wg.Done()

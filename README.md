@@ -164,6 +164,26 @@ So the example above means:
 This is especially helpful for stuff like incremental content rendering, when you need
 to ensure that the system converges to the last known state.
 
+### Debounce jobs with a start delay
+
+Sometimes it is desirable to delay the actual start of a job and wait until some time has passed and no other start of
+the same pipeline was triggered. This is especially useful with `queue_strategy: replace` where this can act as a
+debounce of events (e.g. a user in an application performs some actions and a pipeline run is triggered for each action).
+
+The delay can be configured on the pipeline level with the `start_delay` property. The value is given as duration
+in form of a zero or positive decimal value with a time unit ("ms", "s", "m", "h" are supported): 
+
+```yaml
+pipelines:
+  do_something:
+    queue_limit: 1
+    queue_strategy: replace
+    concurrency: 1
+    # Queues a run of the job and only starts it after 10 seconds have passed (if no other run was triggered which replaced the queued job)
+    start_delay: 10s
+    tasks: # as usual
+```
+
 
 ### Disabling Fail-Fast Behavior
 
@@ -185,7 +205,7 @@ pipelines:
 
 By default, we never delete any runs. For many projects, it is useful to configure this to keep the
 consumed disk space under control. This can be done on a per-pipeline level; using one of the two configuration
-settings `retention_period_hours` and `retention_count`:
+settings `retention_period` (decimal with time unit as in `start_delay`) and `retention_count`.
 
 As an example, let's configure we only are interested on the last 10 pipeline runs:
 
@@ -201,7 +221,7 @@ Alternatively, we can delete the data after two days:
 ```yaml
 pipelines:
   do_something:
-    retention_period_hours: 48
+    retention_period: 48h
     tasks: # as usual
 ```
 

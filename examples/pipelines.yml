@@ -88,6 +88,26 @@ pipelines:
 
   replace_it:
     queue_strategy: replace
+    queue_limit: 1
+    tasks:
+      lint:
+        script:
+          - echo "Starting something busy"
+          - sleep 2
+          - echo "25% done"
+          - sleep 3
+          - echo "50% done"
+          - sleep 4
+          - echo "75% done"
+          - sleep 2
+          - echo "100% done"
+          - echo -n "Last line"
+
+  replace_it_with_delay:
+    concurrency: 1
+    queue_strategy: replace
+    queue_limit: 1
+    start_delay: 15s
     tasks:
       lint:
         script:

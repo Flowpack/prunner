@@ -5,12 +5,13 @@ import (
 
 	"github.com/apex/log"
 	"github.com/taskctl/taskctl/pkg/task"
+
 	"github.com/Flowpack/prunner/taskctl"
 )
 
 type MockRunner struct {
 	onTaskChange func(t *task.Task)
-	OnRun        func(t *task.Task)
+	OnRun        func(t *task.Task) error
 	OnCancel     func()
 }
 
@@ -29,8 +30,10 @@ func (m *MockRunner) Run(t *task.Task) error {
 	log.WithField("component", "mockRunner").Debugf("Running task %s", t.Name)
 	time.Sleep(1 * time.Millisecond)
 
+	var err error
+
 	if m.OnRun != nil {
-		m.OnRun(t)
+		err = m.OnRun(t)
 	}
 
 	t.End = time.Now()
@@ -38,7 +41,7 @@ func (m *MockRunner) Run(t *task.Task) error {
 		m.onTaskChange(t)
 	}
 
-	return nil
+	return err
 }
 
 func (m *MockRunner) Cancel() {
