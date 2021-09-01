@@ -404,7 +404,9 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 
 	// if the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is set to FALSE),
 	// then we directly abort all other tasks of the job.
-	if t.Errored {
+	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
+	// if one task failed, and we want to kill the other tasks.
+	if jt.Errored {
 		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
 		if found {
 			if !pipelineDef.ContinueRunningTasksAfterFailure {
