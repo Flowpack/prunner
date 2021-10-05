@@ -14,6 +14,9 @@ type TaskDef struct {
 	DependsOn []string `yaml:"depends_on"`
 	// AllowFailure should be set, if the pipeline should continue event if this task had an error
 	AllowFailure bool `yaml:"allow_failure"`
+
+	// Env sets/overrides environment variables for this task (takes precedence over pipeline environment)
+	Env map[string]string `yaml:"env"`
 }
 
 type PipelineDef struct {
@@ -32,6 +35,9 @@ type PipelineDef struct {
 
 	RetentionPeriod time.Duration `yaml:"retention_period"`
 	RetentionCount  int           `yaml:"retention_count"`
+
+	// Env sets/overrides environment variables for all tasks (takes precedence over process environment)
+	Env map[string]string `yaml:"env"`
 
 	Tasks map[string]TaskDef `yaml:"tasks"`
 

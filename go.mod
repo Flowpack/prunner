@@ -10,6 +10,7 @@ require (
 	github.com/go-chi/chi/v5 v5.0.3
 	github.com/go-chi/jwtauth/v5 v5.0.1
 	github.com/gofrs/uuid v4.0.0+incompatible
+	github.com/joho/godotenv v1.4.0 // indirect
 	github.com/json-iterator/go v1.1.9
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
 	github.com/kr/pretty v0.2.1 // indirect

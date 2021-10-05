@@ -1,7 +1,6 @@
 package app
 
 import (
-	"github.com/Flowpack/prunner/store"
 	"io"
 	"net/http"
 	"os"
@@ -14,13 +13,16 @@ import (
 	"github.com/friendsofgo/errors"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
+	"github.com/joho/godotenv"
 	"github.com/mattn/go-isatty"
+	"github.com/taskctl/taskctl/pkg/variables"
 	"github.com/urfave/cli/v2"
 
 	"github.com/Flowpack/prunner"
 	"github.com/Flowpack/prunner/config"
 	"github.com/Flowpack/prunner/definition"
 	"github.com/Flowpack/prunner/server"
+	"github.com/Flowpack/prunner/store"
 	"github.com/Flowpack/prunner/taskctl"
 )
 
@@ -31,6 +33,10 @@ func New() *cli.App {
 
 	app.Before = func(c *cli.Context) error {
 		setLogHandler(c)
+		err := loadDotenv(c)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	// this is the main action - see prunner.go
@@ -79,6 +85,12 @@ func New() *cli.App {
 			Value:   "localhost:9009",
 			EnvVars: []string{"PRUNNER_ADDRESS"},
 		},
+		&cli.StringSliceFlag{
+			Name:    "env-files",
+			Usage:   "Filenames with environment variables to load (dotenv style), will override existing env vars, set empty to skip loading",
+			Value:   cli.NewStringSlice(".env", ".env.local"),
+			EnvVars: []string{"PRUNNER_ENV_FILES"},
+		},
 	}
 
 	app.Commands = []*cli.Command{
@@ -86,6 +98,42 @@ func New() *cli.App {
 	}
 
 	return app
+}
+
+func loadDotenv(c *cli.Context) error {
+	if envFiles := c.StringSlice("env-files"); len(envFiles) > 0 && envFiles[0] != "" {
+		for _, envFile := range envFiles {
+			err := loadEnvFile(envFile)
+			if err != nil {
+				return errors.Wrapf(err, "loading env file %s", envFile)
+			}
+		}
+	}
+	return nil
+}
+
+func loadEnvFile(file string) error {
+	f, err := os.Open(file)
+	if os.IsNotExist(err) {
+		// Ignore not existing dotenv files
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	log.
+		WithField("component", "cli").
+		Debugf("Loading env from %q", file)
+
+	envVars, err := godotenv.Parse(f)
+	if err != nil {
+		return err
+	}
+	for key, value := range envVars {
+		_ = os.Setenv(key, value)
+	}
+	return nil
 }
 
 // appAction is the main function which starts everything including the HTTP server.
@@ -122,9 +170,9 @@ func appAction(c *cli.Context) error {
 	}
 
 	// Set up pipeline runner
-	pRunner, err := prunner.NewPipelineRunner(c.Context, defs, func() taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(c.Context, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		// taskctl.NewTaskRunner never actually returns an error
-		taskRunner, _ := taskctl.NewTaskRunner(outputStore)
+		taskRunner, _ := taskctl.NewTaskRunner(outputStore, taskctl.WithEnv(variables.FromMap(j.Env)))
 
 		// Do not output task stdout / stderr to the server process. NOTE: Before/After execution logs won't be visible because of this
 		taskRunner.Stdout = io.Discard

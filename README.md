@@ -88,7 +88,7 @@ do this outside prunner, and pass in a Job Argument with an identifier to every 
 ### Job Variables
 
 When starting a job, (i.e. `do_something` in the example below), you can send additional
-**Variables** as JSON. The script is passed through the [text/template](https://pkg.go.dev/text/template)
+**variables** as JSON. The script is passed through the [text/template](https://pkg.go.dev/text/template)
 templating language, where you can access the variables. This way, you can pass the variable
 contents to your scripts.
 
@@ -103,6 +103,39 @@ pipelines:
         script:
           - echo {{ .myVariable }}
 ```
+
+> Note that these variables are _not environment variables (env vars)_ and are evaluated via the template engine before the shell invokes the script commands.
+
+### Environment variables
+
+Environment variables are handled in the following places:
+
+1. **Process level** Prunner will forward the environment variables of the `prunner` process (including dotenv overrides) to commands executed by tasks
+2. **Pipeline level** Environment variables can be set/overridden in a pipeline definition (overrides process level)
+3. **Task level** Environment variables can be set/overridden in a task definition (overrides pipeline level)
+
+
+```yaml
+pipelines:
+  env:
+    MY_VAR: set some value for all tasks here
+  do_something:
+    tasks:
+      do_foo:
+        script:
+          # output: set some value for all tasks here\n
+          - echo $MY_VAR
+      do_bar:
+        env:
+          MY_VAR: override it for this task
+        script:
+          # output: override it for this task\n
+          - echo $MY_VAR
+```
+
+#### Dotenv files
+
+Prunner will override the process environment from files `.env` and `.env.local` by default. The files are configurable via the `env-files` flag.
 
 ### Limiting Concurrency
 
