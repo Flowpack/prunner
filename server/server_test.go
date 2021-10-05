@@ -60,7 +60,7 @@ func TestServer_Pipelines(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		return &test.MockRunner{}
 	}, nil, nil)
 	require.NoError(t, err)
@@ -95,7 +95,7 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		return &test.MockRunner{}
 	}, nil, nil)
 	require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		return &test.MockRunner{}
 	}, nil, nil)
 	require.NoError(t, err)
@@ -203,7 +203,7 @@ func TestServer_JobCancel(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				wg.Wait()

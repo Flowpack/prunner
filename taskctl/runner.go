@@ -76,7 +76,7 @@ func NewTaskRunner(outputStore OutputStore, opts ...Opts) (*TaskRunner, error) {
 		o(r)
 	}
 
-	r.env = variables.FromMap(map[string]string{"ARGS": r.variables.Get("Args").(string)})
+	r.env.Merge(variables.FromMap(map[string]string{"ARGS": r.variables.Get("Args").(string)}))
 
 	return r, nil
 }
@@ -420,6 +420,14 @@ func WithContexts(contexts map[string]*runner.ExecutionContext) Opts {
 		runner.contexts = contexts
 	}
 }
+
+// WithEnv adds provided environment variables to task runner
+func WithEnv(env variables.Container) Opts {
+	return func(runner *TaskRunner) {
+		runner.env = env
+	}
+}
+
 
 // WithVariables adds provided variables to task runner
 func WithVariables(variables variables.Container) Opts {

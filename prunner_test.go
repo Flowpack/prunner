@@ -3,6 +3,7 @@ package prunner
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/apex/log"
 	"github.com/gofrs/uuid"
 	"github.com/taskctl/taskctl/pkg/task"
+	"github.com/taskctl/taskctl/pkg/variables"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,7 +150,7 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -159,6 +161,64 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	require.NoError(t, err)
 
 	waitForCompletedJob(t, pRunner, job.ID)
+}
+
+func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
+	// Make sure process env vars are used up as well
+	err := os.Setenv("GLOBAL_VAR", "from process")
+	require.NoError(t, err)
+
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"env_vars": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Env: map[string]string{
+					"MY_VAR": "from pipeline",
+					"OTHER_VAR": "from pipeline",
+				},
+				Tasks: map[string]definition.TaskDef{
+					"pipeline_var": {
+						Script: []string{"echo -n \"$MY_VAR,$OTHER_VAR,$GLOBAL_VAR\""},
+					},
+					"task_var": {
+						Env: map[string]string{
+							"MY_VAR": "from task",
+						},
+						Script: []string{"echo -n \"$MY_VAR,$OTHER_VAR,$GLOBAL_VAR\""},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockOutputStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(store, taskctl.WithEnv(variables.FromMap(j.Env)))
+		return taskRunner
+	}, nil, store)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("env_vars", ScheduleOpts{
+		Variables: map[string]interface{}{
+			"test_var": "test",
+		},
+	})
+	require.NoError(t, err)
+
+	waitForCompletedJob(t, pRunner, job.ID)
+
+	pipelineVarTaskOutput := store.GetBytes(job.ID.String(), "pipeline_var", "stdout")
+	assert.Equal(t, "from pipeline,from pipeline,from process", string(pipelineVarTaskOutput), "output of pipeline_var")
+
+	taskVarTaskOutput := store.GetBytes(job.ID.String(), "task_var", "stdout")
+	assert.Equal(t, "from task,from pipeline,from process", string(taskVarTaskOutput), "output of task_var")
 }
 
 func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
@@ -181,7 +241,7 @@ func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -237,7 +297,7 @@ func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *tes
 
 	// now, we start a NEW prunner instance with the same store,
 	// to ensure we reach an inconsistent state (no taskRunner set).
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -274,7 +334,7 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				if t.Name == "err" {
@@ -337,7 +397,7 @@ func TestPipelineRunner_FirstErroredTaskShouldNotCancelAllOtherRunningTasks_IfCo
 
 	var canceled bool
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				if t.Name == "err" {
@@ -418,7 +478,7 @@ func TestPipelineRunner_ShouldRemoveOldJobsWhenRetentionPeriodIsConfigured(t *te
 	defer cancel()
 
 	store := test.NewMockStore()
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -451,7 +511,7 @@ func TestPipelineRunner_ShouldRemoveOldJobsWhenRetentionPeriodIsConfigured(t *te
 
 	// now, we instantiate a NEW prunner instance from the same store, ensuring we have again only the right job in there (the latest one). This
 	// tests that we compacted not only the in-memory representation, but also the on-disk one.
-	pRunner2, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner2, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
@@ -484,7 +544,7 @@ func TestPipelineRunner_ShouldNotRemoveStillRunningJobsEvenIfRetentionPeriodIsVi
 	var wg sync.WaitGroup
 
 	store := test.NewMockStore()
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				// Wait until wait group is marked as done
@@ -548,7 +608,7 @@ func TestPipelineRunner_TimeBasedRetentionPolicyCalculatesCorrectly(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{}
 	}, nil, nil)
 	require.NoError(t, err)
@@ -599,7 +659,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 	defer cancel()
 
 	store := test.NewMockStore()
-	pRunner, err := NewPipelineRunner(ctx, defs, func() taskctl.Runner {
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				return nil

@@ -43,14 +43,14 @@ type PipelineRunner struct {
 
 	// Mutex for reading or writing jobs and job state
 	mx               sync.RWMutex
-	createTaskRunner func() taskctl.Runner
+	createTaskRunner func(j *PipelineJob) taskctl.Runner
 
 	// Wait group for waiting for asynchronous operations like job.Cancel
 	wg sync.WaitGroup
 }
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
-func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func() taskctl.Runner, store store.DataStore, outputStore taskctl.OutputStore) (*PipelineRunner, error) {
+func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func(j *PipelineJob) taskctl.Runner, store store.DataStore, outputStore taskctl.OutputStore) (*PipelineRunner, error) {
 	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -94,6 +94,7 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 type PipelineJob struct {
 	ID         uuid.UUID
 	Pipeline   string
+	Env        map[string]string
 	Variables  map[string]interface{}
 	StartDelay time.Duration
 
@@ -122,7 +123,7 @@ func (j *PipelineJob) isRunning() bool {
 func (r *PipelineRunner) initScheduler(j *PipelineJob) {
 	// For correct cancellation of tasks a single task runner and scheduler per job is used
 
-	taskRunner := r.createTaskRunner()
+	taskRunner := r.createTaskRunner(j)
 
 	sched := taskctl.NewScheduler(taskRunner)
 
@@ -205,6 +206,7 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 		Pipeline:   pipeline,
 		Created:    time.Now(),
 		Tasks:      buildJobTasks(pipelineDef.Tasks),
+		Env:        pipelineDef.Env,
 		Variables:  opts.Variables,
 		User:       opts.User,
 		StartDelay: pipelineDef.StartDelay,
@@ -285,6 +287,7 @@ func buildPipelineGraph(id uuid.UUID, tasks jobTasks, vars map[string]interface{
 	var stages []*scheduler.Stage
 	for _, taskDef := range tasks {
 		t := task.FromCommands(taskDef.Script...)
+		t.Env = variables.FromMap(taskDef.Env)
 		t.Name = taskDef.Name
 		t.AllowFailure = taskDef.AllowFailure
 
