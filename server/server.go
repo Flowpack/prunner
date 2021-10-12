@@ -164,6 +164,8 @@ type taskResult struct {
 	// Task name
 	// example: task_name
 	Name string `json:"name"`
+	// Task names this task depends on
+	DependsOn []string `json:"dependsOn,omitempty"`
 	// Status of task
 	// enum: waiting,running,skipped,done,error,canceled
 	Status string `json:"status"`
@@ -221,14 +223,15 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 	errored := false
 	for _, t := range j.Tasks {
 		res := taskResult{
-			Name:     t.Name,
-			Status:   t.Status,
-			Start:    t.Start,
-			End:      t.End,
-			Skipped:  t.Skipped,
-			ExitCode: t.ExitCode,
-			Errored:  t.Errored,
-			Error:    helper.ErrToStrPtr(t.Error),
+			Name:      t.Name,
+			DependsOn: t.DependsOn,
+			Status:    t.Status,
+			Start:     t.Start,
+			End:       t.End,
+			Skipped:   t.Skipped,
+			ExitCode:  t.ExitCode,
+			Errored:   t.Errored,
+			Error:     helper.ErrToStrPtr(t.Error),
 		}
 		taskResults = append(taskResults, res)
 		// Collect if job had a errored task

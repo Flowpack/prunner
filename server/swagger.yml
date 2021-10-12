@@ -88,6 +88,12 @@ definitions:
     x-go-package: github.com/Flowpack/prunner/server
   task:
     properties:
+      dependsOn:
+        description: Task names this task depends on
+        items:
+          type: string
+        type: array
+        x-go-name: DependsOn
       end:
         description: When the task was finished
         format: date-time
