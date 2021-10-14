@@ -1,19 +1,20 @@
-# Pipeline Runner
+<img src="docs/prunner-logo-light.png" width="320" align="center">
 
-**An embeddable task / pipeline runner with a HTTP API.**
+---
 
+**Prunner is an embeddable task / pipeline runner with an HTTP API.**
+
+- It is easy to embed in your own projects.
 - Good for orchestrating long-running jobs with multiple steps; so if you think "I need a CI pipeline" but within your project, this is for you.
 - The pipeline definition is done in a `pipelines.yml` file and is static.
 - To start a new job, you use an authenticated HTTP API (see our [API docs](https://bump.sh/doc/prunner)).
 - Every task inside the pipeline is a script run on the command line.
-- Tasks can have dependencies; so together, they form a graph (DAG)
-- supports pipeline arguments
-- supports configurable parallelism, also with a "wait-list" if the parallelism is exceeded.
-- Persistent storage of jobs and their outputs
+- Tasks can have dependencies; so together, they form a graph (DAG).
+- It supports runtime variables for pipelines.
+- It supports configurable parallelism, also with a "wait-list" if the parallelism is exceeded.
+- It has a persistent storage of jobs and their outputs.
 
-This is NOT a full CI pipeline solution.
-
-**For a full introduction, see the [README of the prunner repo](https://github.com/Flowpack/prunner)**.
+This is NOT a fully featured CI pipeline solution.
 
 ## Components
 
@@ -24,11 +25,11 @@ It needs to be started in the background for integration into other applications
 
 ### [prunner-ui](https://github.com/Flowpack/prunner-ui)
 
-A minimalistic React UI to start and view pipelines, jobs and task details.
+A minimalistic React UI to start and view pipelines, job and task details.
 
 ### [Flowpack.Prunner](https://github.com/Flowpack/Flowpack.Prunner)
 
-A Neos/Flow PHP package providing a backend module for the current pipeline state, and a PHP API.
+A Neos/Flow PHP package providing a backend module embedding prunner-ui and a PHP API for interacting with the prunner Rest API.
 
 ## User Guide
 
@@ -167,7 +168,7 @@ The waitlist can have a maximum size, denoted by `queue_limit`:
 ```yaml
 pipelines:
   do_something:
-    queue_limit: 1 
+    queue_limit: 1
     concurrency: 1
     tasks: # as usual
 ```
@@ -204,7 +205,7 @@ the same pipeline was triggered. This is especially useful with `queue_strategy:
 debounce of events (e.g. a user in an application performs some actions and a pipeline run is triggered for each action).
 
 The delay can be configured on the pipeline level with the `start_delay` property. The value is given as duration
-in form of a zero or positive decimal value with a time unit ("ms", "s", "m", "h" are supported): 
+in form of a zero or positive decimal value with a time unit ("ms", "s", "m", "h" are supported):
 
 ```yaml
 pipelines:
@@ -380,7 +381,7 @@ go test ./... -v -run TestServer_HugeOutput
 ```
 
 As linter, we use golangci-lint. See [this page for platform-specific installation instructions](https://golangci-lint.run/usage/install/#local-installation).
-Then, to run the linter, use: 
+Then, to run the linter, use:
 
 ```bash
 golangci-lint run
