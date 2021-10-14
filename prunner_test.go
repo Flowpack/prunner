@@ -661,7 +661,8 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 	store := test.NewMockStore()
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
-			OnRun: func(t *task.Task) error {
+			OnRun: func(tsk *task.Task) error {
+				log.Debugf("Run task %s on job %s", tsk.Name, j.ID.String())
 				return nil
 			},
 		}
@@ -709,6 +710,81 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		return started
 	}, 1*time.Millisecond, "job2 is started")
 
+	// Wait until all jobs are finished
+	test.WaitForCondition(t, func() bool {
+		var running bool
+		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
+			running = j.isRunning()
+		})
+		return !running
+	}, 1*time.Millisecond, "job2 is finished")
+}
+
+func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillNotRunConcurrently(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithStartDelay": {
+				Concurrency:   1,
+				StartDelay:    50 * time.Millisecond,
+				QueueLimit:    intPtr(1),
+				QueueStrategy: definition.QueueStrategyReplace,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"echo Test"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+	require.NoError(t, defs.Validate())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(tsk *task.Task) error {
+				time.Sleep(100*time.Millisecond)
+				return nil
+			},
+		}
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			started = j.Start != nil
+		})
+		return started
+	}, 1*time.Millisecond, "job is started")
+
+	// This job should queue and not start until the first one is finished!
+	job2, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	job2ID := job2.ID
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
+			started = j.Start != nil
+		})
+		return started
+	}, 1*time.Millisecond, "job2 is started")
+
+	{
+		var running bool
+		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
+			running = j.isRunning()
+		})
+		require.False(t, running, "job1 must not be running after job2 started")
+	}
 }
 
 func intPtr(i int) *int {
