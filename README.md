@@ -4,7 +4,7 @@
 
 **Prunner is an embeddable task / pipeline runner with an HTTP API.**
 
-- It is easy to embed in your own projects.
+- It is easy to embed in your own projects: just a single binary, no database or other services needed.
 - Good for orchestrating long-running jobs with multiple steps; so if you think "I need a CI pipeline" but within your project, this is for you.
 - The pipeline definition is done in a `pipelines.yml` file and is static.
 - To start a new job, you use an authenticated HTTP API (see our [API docs](https://bump.sh/doc/prunner)).
