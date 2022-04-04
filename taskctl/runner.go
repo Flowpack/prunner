@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/apex/log"
 	"github.com/taskctl/taskctl/pkg/executor"
 	"github.com/taskctl/taskctl/pkg/output"
 	"github.com/taskctl/taskctl/pkg/runner"
@@ -52,6 +52,8 @@ type TaskRunner struct {
 	outputStore OutputStore
 
 	onTaskChange func(t *task.Task)
+
+	killTimeout time.Duration
 }
 
 var _ Runner = &TaskRunner{}
@@ -68,6 +70,8 @@ func NewTaskRunner(outputStore OutputStore, opts ...Opts) (*TaskRunner, error) {
 		env:          variables.NewVariables(),
 
 		outputStore: outputStore,
+
+		killTimeout: 2 * time.Second,
 	}
 
 	r.ctx, r.cancelFunc = context.WithCancel(context.Background())
@@ -125,7 +129,7 @@ func (r *TaskRunner) Run(t *task.Task) error {
 	defer func() {
 		err = execContext.After()
 		if err != nil {
-			logrus.Error(err)
+			log.Errorf("Error executing after tasks: %v", err)
 		}
 
 		if !t.Errored && !t.Skipped {
@@ -139,13 +143,18 @@ func (r *TaskRunner) Run(t *task.Task) error {
 	env = env.With("TASK_NAME", t.Name)
 	env = env.Merge(t.Env)
 
+	jobID := t.Variables.Get(JobIDVariableName).(string)
+
 	meets, err := r.checkTaskCondition(t)
 	if err != nil {
 		return err
 	}
 
 	if !meets {
-		logrus.Infof("task %s was skipped", t.Name)
+		log.
+			WithField("component", "runner").
+			WithField("jobID", jobID).
+			Infof("Task %s was skipped", t.Name)
 		t.Skipped = true
 		return nil
 	}
@@ -154,8 +163,6 @@ func (r *TaskRunner) Run(t *task.Task) error {
 	if err != nil {
 		return err
 	}
-
-	jobID := t.Variables.Get(JobIDVariableName).(string)
 
 	var (
 		stdoutWriter = []io.Writer{&t.Log.Stdout}
@@ -214,7 +221,9 @@ func (r *TaskRunner) Cancel() {
 	r.cancelMutex.Lock()
 	if !r.canceling {
 		r.canceling = true
-		defer logrus.Debug("runner has been cancelled")
+		defer log.
+			WithField("component", "runner").
+			Debug("Task runner has been cancelled")
 		r.cancelFunc()
 	}
 	r.cancelMutex.Unlock()
@@ -255,7 +264,7 @@ func (r *TaskRunner) before(ctx context.Context, t *task.Task, env, vars variabl
 			return fmt.Errorf("\"before\" command compilation failed: %w", err)
 		}
 
-		exec, err := executor.NewDefaultExecutor(job.Stdin, job.Stdout, job.Stderr)
+		exec, err := NewPgidExecutor(job.Stdin, job.Stdout, job.Stderr, r.killTimeout)
 		if err != nil {
 			return err
 		}
@@ -285,14 +294,17 @@ func (r *TaskRunner) after(ctx context.Context, t *task.Task, env, vars variable
 			return fmt.Errorf("\"after\" command compilation failed: %w", err)
 		}
 
-		exec, err := executor.NewDefaultExecutor(job.Stdin, job.Stdout, job.Stderr)
+		exec, err := NewPgidExecutor(job.Stdin, job.Stdout, job.Stderr, r.killTimeout)
 		if err != nil {
 			return err
 		}
 
 		_, err = exec.Execute(ctx, job)
 		if err != nil {
-			logrus.Warning(err)
+			log.
+				WithField("component", "runner").
+				WithField("command", command).
+				Warnf("After command failed: %v", err)
 		}
 	}
 
@@ -340,7 +352,7 @@ func (r *TaskRunner) checkTaskCondition(t *task.Task) (bool, error) {
 		return false, err
 	}
 
-	exec, err := executor.NewDefaultExecutor(job.Stdin, job.Stdout, job.Stderr)
+	exec, err := NewPgidExecutor(job.Stdin, job.Stdout, job.Stderr, r.killTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -370,7 +382,7 @@ func (r *TaskRunner) storeTaskOutput(t *task.Task) {
 }
 
 func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Job) error {
-	exec, err := executor.NewDefaultExecutor(job.Stdin, job.Stdout, job.Stderr)
+	exec, err := NewPgidExecutor(job.Stdin, job.Stdout, job.Stderr, r.killTimeout)
 	if err != nil {
 		return err
 	}
@@ -385,7 +397,6 @@ func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Jo
 
 		prevOutput, err = exec.Execute(ctx, nextJob)
 		if err != nil {
-			t.End = time.Now()
 			if status, ok := executor.IsExitStatus(err); ok {
 				t.ExitCode = int16(status)
 				if t.AllowFailure {
@@ -428,12 +439,18 @@ func WithEnv(env variables.Container) Opts {
 	}
 }
 
-
 // WithVariables adds provided variables to task runner
 func WithVariables(variables variables.Container) Opts {
 	return func(runner *TaskRunner) {
 		runner.variables = variables
 		// TODO The variables field is not exported
 		// runner.compiler.variables = variables
+	}
+}
+
+// WithKillTimeout sets the kill timeout for execution of commands
+func WithKillTimeout(killTimeout time.Duration) Opts {
+	return func(runner *TaskRunner) {
+		runner.killTimeout = killTimeout
 	}
 }

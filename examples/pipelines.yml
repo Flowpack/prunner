@@ -3,7 +3,7 @@ pipelines:
     tasks:
       lint:
         script:
-          - staticcheck $(go list ./... | grep -v /vendor/)
+          # - staticcheck $(go list ./... | grep -v /vendor/)
           - go vet $(go list ./... | grep -v /vendor/)
       test:
         script:
@@ -11,37 +11,9 @@ pipelines:
       do_something_long:
         script:
           - echo Tick
-          - sleep 1
+          - sleep 20
           - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
-          - echo Tick
-          - sleep 1
-          - echo Tock
-          - sleep 1
+          - sleep 20
           - echo Dong
       build:
         script:

@@ -264,84 +264,27 @@ You can also combine the two options. Then, deletion occurs with whatever comes 
 If a pipeline does not exist at all anymore (i.e. if you renamed `do_something` to `another_name` above),
 its persisted logs and task data is removed automatically on saving to disk.
 
+### Handling of child processes
 
-### Interruptible Jobs
+Prunner starts child processes with `setpgid` to use a new process group for each task of a pipeline job.
+This means that if a job is cancelled, all child processes are killed - even if they were run by a shell script.
 
-When terminating a task, unfortunately, only the top-level executed script is terminated - and the script needs
-to take care to kill its children appropriately and not hang. This is very likely because of the following invocation chain:
+Note: If prunner is killed hard (e.g. SIGKILL) without SIGINT / SIGTERM, the child processes of running jobs will not be terminated.
 
-- prunner
-- taskctl
-- mvdan/sh [DefaultExecHandler](https://github.com/mvdan/sh/blob/master/interp/handler.go#L100-L104)
+### Graceful shutdown
 
--> This kills only the process itself, **but not its children**. Unfortunately for us, Bash [does not forward signals like
-SIGTERM to processes it is currently waiting on](https://unix.stackexchange.com/questions/146756/forward-sigterm-to-child-in-bash).
-
-Currently, killing children recursively is not implemented, but can be done manually in a bash script [as explained here](https://newbedev.com/forward-sigterm-to-child-in-bash):
-
-Instead of doing:
-
-```
-#!/usr/bin/env bash
-
-/usr/local/bin/my_long_running_process
-```
-
-You can do the following to pass along signals:
-
-```bash
-#!/usr/bin/env bash
-# taken from https://newbedev.com/forward-sigterm-to-child-in-bash
-
-prep_term()
-{
-    unset term_child_pid
-    unset term_kill_needed
-    trap 'handle_term' TERM INT
-}
-
-handle_term()
-{
-    if [ "${term_child_pid}" ]; then
-        kill -TERM "${term_child_pid}" 2>/dev/null
-    else
-        term_kill_needed="yes"
-    fi
-}
-
-wait_term()
-{
-    term_child_pid=$!
-    if [ "${term_kill_needed}" ]; then
-        kill -TERM "${term_child_pid}" 2>/dev/null
-    fi
-    wait ${term_child_pid} 2>/dev/null
-    trap - TERM INT
-    wait ${term_child_pid} 2>/dev/null
-}
-
-
-prep_term
-/usr/local/bin/my_long_running_process &
-wait_term
-```
-
-**This is a workaround; and at some point in the future it would be nice to solve it as [explained here](https://medium.com/@felixge/killing-a-child-process-and-all-of-its-children-in-go-54079af94773)**.
+Prunner will handle a SIGINT signal and perform a graceful shutdown and wait for all running jobs to be completed.
+Sending a SIGTERM signal to prunner will cancel all running jobs (and interrupt / kill child processes).
 
 ### Persistent Job State
-
-
-
-
 
 ## Development
 
 ### Requirements
 
-* Go (>= 1.16)
+* Go (>= 1.18)
 
 ### Running locally
-
 
 ```bash
 go run cmd/prunner/main.go

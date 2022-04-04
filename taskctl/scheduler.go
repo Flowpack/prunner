@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/apex/log"
 	"github.com/taskctl/taskctl/pkg/runner"
 	"github.com/taskctl/taskctl/pkg/scheduler"
 	"github.com/taskctl/taskctl/pkg/utils"
@@ -61,7 +61,9 @@ func (s *Scheduler) Schedule(g *scheduler.ExecutionGraph) error {
 			if stage.Condition != "" {
 				meets, err := checkStageCondition(stage.Condition)
 				if err != nil {
-					logrus.Error(err)
+					log.
+						WithField("component", "runner").
+						Errorf("Failed to check stage condition: %v", err)
 					stage.UpdateStatus(scheduler.StatusError)
 					s.notifyStageChange(stage)
 					s.Cancel()
@@ -174,7 +176,8 @@ func checkStatus(p *scheduler.ExecutionGraph, stage *scheduler.Stage) (ready boo
 	for _, dep := range p.To(stage.Name) {
 		depStage, err := p.Node(dep)
 		if err != nil {
-			logrus.Fatal(err)
+			// This should not happen unless the graph is inconsistent
+			panic(err)
 		}
 
 		switch depStage.ReadStatus() {
