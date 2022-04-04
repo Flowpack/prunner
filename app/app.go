@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -27,19 +28,22 @@ import (
 )
 
 // New builds a CLI app with the main entry point (called from cmd/prunner/main.go)
-func New() *cli.App {
+func New(info Info) *cli.App {
 	app := cli.NewApp()
 	app.Usage = "Pipeline runner"
 
 	app.Before = func(c *cli.Context) error {
 		setLogHandler(c)
+		log.
+			WithField("version", info.Version).
+			Debug("Starting Prunner")
 		err := loadDotenv(c)
 		if err != nil {
 			return err
 		}
+
 		return nil
 	}
-	// this is the main action - see prunner.go
 	app.Action = appAction
 	app.Flags = []cli.Flag{
 		&cli.BoolFlag{
@@ -95,6 +99,14 @@ func New() *cli.App {
 
 	app.Commands = []*cli.Command{
 		newDebugCmd(),
+		{
+			Name:  "version",
+			Usage: "Print the current version",
+			Action: func(c *cli.Context) error {
+				fmt.Println(info.Version)
+				return nil
+			},
+		},
 	}
 
 	return app
@@ -123,7 +135,6 @@ func loadEnvFile(file string) error {
 	defer f.Close()
 
 	log.
-		WithField("component", "cli").
 		Debugf("Loading env from %q", file)
 
 	envVars, err := godotenv.Parse(f)
@@ -153,7 +164,6 @@ func appAction(c *cli.Context) error {
 	}
 
 	log.
-		WithField("component", "cli").
 		WithField("pipelines", defs.Pipelines.NamesWithSourcePath()).
 		Infof("Loaded %d pipeline definitions", len(defs.Pipelines))
 
@@ -194,7 +204,6 @@ func appAction(c *cli.Context) error {
 	// Set up a simple REST API for listing jobs and scheduling pipelines
 
 	log.
-		WithField("component", "cli").
 		Infof("HTTP API Listening on %s", c.String("address"))
 	return http.ListenAndServe(c.String("address"), srv)
 }
