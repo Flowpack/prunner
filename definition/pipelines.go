@@ -19,6 +19,27 @@ type TaskDef struct {
 	Env map[string]string `yaml:"env"`
 }
 
+func (d TaskDef) Equals(otherDef TaskDef) bool {
+	if !strSliceEquals(d.Script, otherDef.Script) {
+		return false
+	}
+	if !strSliceEquals(d.DependsOn, otherDef.DependsOn) {
+		return false
+	}
+	if d.AllowFailure != otherDef.AllowFailure {
+		return false
+	}
+	if len(d.Env) != len(otherDef.Env) {
+		return false
+	}
+	for k, v := range d.Env {
+		if otherDef.Env[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 type PipelineDef struct {
 	// Concurrency declares how many instances of this pipeline are allowed to execute concurrently (defaults to 1)
 	Concurrency int `yaml:"concurrency"`
@@ -69,6 +90,57 @@ func (d PipelineDef) validate() error {
 	}
 
 	return nil
+}
+
+func (d PipelineDef) Equals(otherDef PipelineDef) bool {
+	if d.Concurrency != otherDef.Concurrency {
+		return false
+	}
+	if (d.QueueLimit == nil) != (otherDef.QueueLimit == nil) {
+		return false
+	}
+	if d.QueueLimit != nil && otherDef.QueueLimit != nil && *d.QueueLimit != *otherDef.QueueLimit {
+		return false
+	}
+	if d.QueueStrategy != otherDef.QueueStrategy {
+		return false
+	}
+	if d.StartDelay != otherDef.StartDelay {
+		return false
+	}
+	if d.ContinueRunningTasksAfterFailure != otherDef.ContinueRunningTasksAfterFailure {
+		return false
+	}
+	if d.RetentionPeriod != otherDef.RetentionPeriod {
+		return false
+	}
+	if d.RetentionCount != otherDef.RetentionCount {
+		return false
+	}
+	if len(d.Env) != len(otherDef.Env) {
+		return false
+	}
+	for k, v := range d.Env {
+		if otherDef.Env[k] != v {
+			return false
+		}
+	}
+	if len(d.Tasks) != len(otherDef.Tasks) {
+		return false
+	}
+	for taskName, taskDef := range d.Tasks {
+		otherTaskDef, exists := otherDef.Tasks[taskName]
+		if !exists {
+			return false
+		}
+		if !taskDef.Equals(otherTaskDef) {
+			return false
+		}
+	}
+	if d.SourcePath != otherDef.SourcePath {
+		return false
+	}
+	return true
 }
 
 type QueueStrategy int
@@ -125,6 +197,22 @@ func (d *PipelinesDef) Validate() error {
 	return nil
 }
 
+func (d PipelinesDef) Equals(otherDefs PipelinesDef) bool {
+	if len(d.Pipelines) != len(otherDefs.Pipelines) {
+		return false
+	}
+	for pipeline, pipelineDef := range d.Pipelines {
+		otherPipelineDef, exists := otherDefs.Pipelines[pipeline]
+		if !exists {
+			return false
+		}
+		if !pipelineDef.Equals(otherPipelineDef) {
+			return false
+		}
+	}
+	return true
+}
+
 type KeyValue map[string]string
 
 func (m PipelinesMap) NamesWithSourcePath() KeyValue {
@@ -142,4 +230,16 @@ func (kv KeyValue) String() string {
 	}
 
 	return strings.Join(result, ", ")
+}
+
+func strSliceEquals(s1 []string, s2 []string) bool {
+	if len(s1) != len(s2) {
+		return false
+	}
+	for i, v := range s1 {
+		if s2[i] != v {
+			return false
+		}
+	}
+	return true
 }

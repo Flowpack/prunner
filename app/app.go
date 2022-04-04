@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/apex/log"
 	logfmt_handler "github.com/apex/log/handlers/logfmt"
@@ -96,6 +98,17 @@ func New(info Info) *cli.App {
 			Usage:   "Filenames with environment variables to load (dotenv style), will override existing env vars, set empty to skip loading",
 			Value:   cli.NewStringSlice(".env", ".env.local"),
 			EnvVars: []string{"PRUNNER_ENV_FILES"},
+		},
+		&cli.BoolFlag{
+			Name:    "watch",
+			Usage:   "Watch for pipeline configuration changes and reload them",
+			EnvVars: []string{"PRUNNER_WATCH"},
+		},
+		&cli.DurationFlag{
+			Name:    "poll-interval",
+			Usage:   "Poll interval for pipeline configuration changes (if watch is enabled)",
+			Value:   30 * time.Second,
+			EnvVars: []string{"PRUNNER_POLL_INTERVAL"},
 		},
 	}
 
@@ -229,6 +242,8 @@ func appAction(c *cli.Context) error {
 	shutdownCtx, shutdownCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
 	defer shutdownCancel()
 
+	handleDefinitionChanges(ctx, c, pRunner, &defs)
+
 	// Wait for SIGINT or SIGTERM
 	<-ctx.Done()
 
@@ -241,6 +256,52 @@ func appAction(c *cli.Context) error {
 	log.Info("Shutdown complete")
 
 	return nil
+}
+
+func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunner.PipelineRunner, defs **definition.PipelinesDef) {
+	reloadDefinitions := func() {
+		newDefs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
+		if err != nil {
+			log.Errorf("Error loading pipeline definitions: %s", err)
+			return
+		}
+
+		if (*defs).Equals(*newDefs) {
+			log.Debug("Reloading pipeline definitions: no changes detected")
+			return
+		}
+		*defs = newDefs
+		pRunner.ReplaceDefinitions(*defs)
+		log.
+			WithField("pipelines", (*defs).Pipelines.NamesWithSourcePath()).
+			Infof("Definitions changed, loaded %d pipelines", len((*defs).Pipelines))
+	}
+
+	watchEnabled := c.Bool("watch")
+	go func() {
+		// We always start a ticker and defer the decision whether to actually reloading depending on watchEnabled.
+		// This makes it easier to use a single select statement.
+		pollInterval := c.Duration("poll-interval")
+		t := time.NewTicker(pollInterval)
+		defer t.Stop()
+
+		notifyReload := make(chan os.Signal, 1)
+		signal.Notify(notifyReload, syscall.SIGUSR1)
+
+		for {
+			select {
+			case <-t.C:
+				if watchEnabled {
+					reloadDefinitions()
+				}
+			case <-notifyReload:
+				log.Info("Received SIGUSR1, reloading pipeline definitions")
+				reloadDefinitions()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 func createLogFormatter(c *cli.Context) middleware.LogFormatter {

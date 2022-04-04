@@ -96,8 +96,10 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 	return pRunner, nil
 }
 
-// PipelineJob is a single execution context (a single run of a single pipeline). Can be scheduled (in the waitListByPipeline of PipelineRunner),
-// or currently running (jobsByID / jobsByPipeline in PipelineRunner)
+// PipelineJob is a single execution context (a single run of a single pipeline)
+//
+// It can be scheduled (in the waitListByPipeline of PipelineRunner),
+// or currently running (jobsByID / jobsByPipeline in PipelineRunner).
 type PipelineJob struct {
 	ID         uuid.UUID
 	Pipeline   string
@@ -428,19 +430,15 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	// if one task failed, and we want to kill the other tasks.
 	if jt.Errored {
 		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
-		if found {
-			if !pipelineDef.ContinueRunningTasksAfterFailure {
-				log.
-					WithField("component", "runner").
-					WithField("jobID", jobIDString).
-					WithField("pipeline", j.Pipeline).
-					WithField("failedTaskName", t.Name).
-					Debug("Task failed - cancelling all other tasks of the job")
-				// we directly call cancelJobInternal; and not CancelJob, because in this method,
-				// we already have the mutex (r.mx) locked - and we cannot lock it twice (otherwise
-				// we'd have a deadlock)
-				_ = r.cancelJobInternal(jobID)
-			}
+		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", jobIDString).
+				WithField("pipeline", j.Pipeline).
+				WithField("failedTaskName", t.Name).
+				Debug("Task failed - cancelling all other tasks of the job")
+			// Use internal cancel since we already have a lock on the mutex
+			_ = r.cancelJobInternal(jobID)
 		}
 	}
 
@@ -880,7 +878,7 @@ func removeJobFromList(jobs []*PipelineJob, jobToRemove *PipelineJob) []*Pipelin
 func (r *PipelineRunner) determineIfJobShouldBeRemoved(index int, job *PipelineJob) (bool, string) {
 	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
 	if !pipelineDefExists {
-		return true, "Pipeline Definition not found"
+		return true, "Pipeline definition not found"
 	}
 
 	if job.Start == nil && !job.Canceled {
@@ -905,7 +903,7 @@ func (r *PipelineRunner) determineIfJobShouldBeRemoved(index int, job *PipelineJ
 }
 
 func (r *PipelineRunner) requestPersist() {
-	// Debounce persist requests by not sending if the persist channel is already full (buffered with length 1)
+	// Debounce persist requests by not sending if the channel is already full (buffered with length 1)
 	select {
 	case r.persistRequests <- struct{}{}:
 		// The default case prevents blocking when sending to a full channel
@@ -988,6 +986,17 @@ func (r *PipelineRunner) StartDelayedJob(id uuid.UUID) {
 
 	// Start pending jobs on wait list (should run delayed job)
 	r.startJobsOnWaitList(job.Pipeline)
+}
+
+// ReplaceDefinitions replaces pipeline definitions for the runner.
+//
+// It can be used to update the definitions after the runner has been started
+// (e.g. by a file watcher or signal for configuration reload).
+func (r *PipelineRunner) ReplaceDefinitions(defs *definition.PipelinesDef) {
+	r.mx.Lock()
+	defer r.mx.Unlock()
+
+	r.defs = defs
 }
 
 func buildJobFromPersistedJob(pJob store.PersistedJob) *PipelineJob {
