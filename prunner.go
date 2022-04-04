@@ -680,8 +680,8 @@ func (r *PipelineRunner) initialLoadFromStore() error {
 				Warnf("Found running job when restoring state, marked as canceled")
 		}
 
-		// Cancel jobs which have been scheduled on wait list but never been started
-		if job.Start == nil {
+		// Cancel jobs which have been scheduled on wait list but never been started or canceled
+		if job.Start == nil && !job.Canceled {
 			job.Canceled = true
 
 			log.
@@ -796,6 +796,9 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		log.
 			WithField("component", "runner").
 			Debugf("Shutting down, waiting for pending operations...")
+		r.wg.Wait()
+		// Do a final save to include recently completed jobs
+		r.SaveToStore()
 		r.wg.Wait()
 	}()
 

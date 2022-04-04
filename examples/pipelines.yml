@@ -11,9 +11,29 @@ pipelines:
       do_something_long:
         script:
           - echo Tick
-          - sleep 20
+          - sleep 1
           - echo Tock
-          - sleep 20
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
+          - echo Tick
+          - sleep 1
+          - echo Tock
+          - sleep 1
           - echo Dong
       build:
         script:

@@ -812,6 +812,8 @@ func TestPipelineRunner_Shutdown_WithRunningJob_Graceful(t *testing.T) {
 		jobCanceled bool
 	)
 
+	store := test.NewMockStore()
+
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(tsk *task.Task) error {
@@ -823,7 +825,7 @@ func TestPipelineRunner_Shutdown_WithRunningJob_Graceful(t *testing.T) {
 				jobCanceled = true
 			},
 		}
-	}, nil, test.NewMockOutputStore())
+	}, store, test.NewMockOutputStore())
 	pRunner.ShutdownPollInterval = 100 * time.Millisecond
 	require.NoError(t, err)
 
@@ -865,11 +867,13 @@ func TestPipelineRunner_Shutdown_WithRunningJob_Forced(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	store := test.NewMockStore()
+
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		// Use a real runner here to test the actual processing of a task.Task
 		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
 		return taskRunner
-	}, nil, test.NewMockOutputStore())
+	}, store, test.NewMockOutputStore())
 	pRunner.ShutdownPollInterval = 100 * time.Millisecond
 	require.NoError(t, err)
 
