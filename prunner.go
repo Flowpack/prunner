@@ -82,7 +82,6 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 			for {
 				select {
 				case <-ctx.Done():
-					log.Debugf("PipelineRunner: context done, stopping persist loop")
 					return
 				case <-pRunner.persistRequests:
 					pRunner.SaveToStore()

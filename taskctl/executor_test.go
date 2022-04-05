@@ -12,7 +12,7 @@ import (
 	"github.com/Flowpack/prunner/taskctl"
 )
 
-func TestDefaultExecutor_Execute(t *testing.T) {
+func TestPgidExecutor_Execute(t *testing.T) {
 	e, err := taskctl.NewPgidExecutor(nil, ioutil.Discard, ioutil.Discard, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)

@@ -129,6 +129,10 @@ func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	pJob, err := s.pRunner.ScheduleAsync(in.Body.Pipeline, prunner.ScheduleOpts{Variables: in.Body.Variables, User: user})
 	if err != nil {
 		// TODO Send JSON error and include expected errors (see resolveScheduleAction)
+		if errors.Is(err, prunner.ErrShuttingDown) {
+			s.sendError(w, http.StatusServiceUnavailable, "Server is shutting down")
+			return
+		}
 
 		s.sendError(w, http.StatusBadRequest, fmt.Sprintf("Error scheduling pipeline: %v", err))
 		return
