@@ -31,9 +31,9 @@ A minimalistic React UI to start and view pipelines, job and task details.
 
 A Neos/Flow PHP package providing a backend module embedding prunner-ui and a PHP API for interacting with the prunner Rest API.
 
-## User Guide
+## User guide
 
-### Main Concepts
+### Main concepts
 
 prunner controls a set of *pipelines*, which are defined in *YAML* files (typically `pipelines.yml`).
 The pipelines consist of *tasks*, which are executed as part of the pipeline. Each task has a `script`
@@ -57,7 +57,7 @@ pipelines:
 ```
 
 
-### Task Dependencies
+### Task dependencies
 
 In case you need to ensure certain steps are executed in-order, you can use
 **task dependencies** to order tasks using the `depends_on` key:
@@ -82,14 +82,14 @@ This is an intended limitation to keep complexity low; so we do not plan to supp
 or anything like this.
 
 In case you need to store information from one task to the next, it is recommended that you
-do this outside prunner, and pass in a Job Argument with an identifier to every task
+do this outside prunner, and pass in a job argument with an identifier to every task
 (explained in the next section).
 
 
-### Job Variables
+### Job variables
 
 When starting a job, (i.e. `do_something` in the example below), you can send additional
-**variables** as JSON. The script is passed through the [text/template](https://pkg.go.dev/text/template)
+**variables** as JSON. The script is passed through the Go [text/template](https://pkg.go.dev/text/template)
 templating language, where you can access the variables. This way, you can pass the variable
 contents to your scripts.
 
@@ -136,9 +136,10 @@ pipelines:
 
 #### Dotenv files
 
-Prunner will override the process environment from files `.env` and `.env.local` by default. The files are configurable via the `env-files` flag.
+Prunner will override the process environment from files `.env` and `.env.local` by default.
+The files are configurable via the `env-files` flag.
 
-### Limiting Concurrency
+### Limiting concurrency
 
 Certain pipelines, like deployment pipelines, usually should only run only once, and never be started
 concurrently. Prunner supports this via a configurable *concurrency*:
@@ -156,7 +157,7 @@ tasks in the pipeline run concurrently.*
 Now, when the concurrency limit is reached and you schedule the pipeline again while it is running,
 **the job is queued** to be worked on later - it is added to the wait list by default.
 
-### The Wait List
+### The wait list
 
 By default, if you limit concurrency, and the limit is exceeded, further jobs are added to the
 waitlist of the pipeline.
@@ -219,7 +220,7 @@ pipelines:
 ```
 
 
-### Disabling Fail-Fast Behavior
+### Disabling fail-fast behavior
 
 By default, if a task in a pipeline fails, all other concurrently running tasks are directly aborted.
 Sometimes this is not desirable, e.g. if certain deployment tasks should continue running if already started.
@@ -235,7 +236,7 @@ pipelines:
 ```
 
 
-### Configuring Retention Period
+### Configuring retention period
 
 By default, we never delete any runs. For many projects, it is useful to configure this to keep the
 consumed disk space under control. This can be done on a per-pipeline level; using one of the two configuration
@@ -276,7 +277,7 @@ Note: If prunner is killed hard (e.g. SIGKILL) without SIGINT / SIGTERM, the chi
 Prunner will handle a SIGINT signal and perform a graceful shutdown and wait for all running jobs to be completed.
 Sending a SIGTERM signal to prunner will cancel all running jobs (and interrupt / kill child processes).
 
-### Persistent Job State
+### Persistent job state
 
 ## Development
 
@@ -287,7 +288,7 @@ Sending a SIGTERM signal to prunner will cancel all running jobs (and interrupt 
 ### Running locally
 
 ```bash
-go run cmd/prunner/main.go
+go run ./cmd/prunner
 ```
 > Note: for development a live reload wrapper like https://github.com/markbates/refresh is recommended.
 
@@ -296,17 +297,17 @@ The API should now be accessible at http://localhost:9009/. The log will contain
 For interacting with the API, you need a JWT token which you can generate for developing using:
 
 ```bash
-go run cmd/prunner/main.go debug
+go run ./cmd/prunner debug
 ```
 
 ### Building for different operating systems.
 
 Using the standard `GOOS` environment variable, you can build for different operating systems. This is helpful when you
-want to use prunner inside a Docker container, but are developing on OSX. For this, a compile step like the following is useful:
+want to use prunner inside a Docker container, but are developing on macOS. For this, a compile step like the following is useful:
 
 ```bash
 # after building, copy the executable inside the docker container; so it can be directly used.
-GOOS=linux go build cmd/prunner/main.go && docker cp main cms_neos_1:/app/main
+GOOS=linux go build ./cmd/prunner -o bin/prunner && docker cp bin/prunner my_container:/app/prunner
 ```
 
 ### Running Tests
@@ -332,7 +333,7 @@ golangci-lint run
 
 ### Generate OpenAPI (Swagger) spec
 
-An OpenAPI 2.0 spec is generated from the Go types and annoations in source code using the `go-swagger` tool (it is not
+An OpenAPI 2.0 spec is generated from the Go types and annotations in source code using the `go-swagger` tool (it is not
 bundled in this module). See https://goswagger.io/install.html for installation instructions.
 
 ```bash
@@ -350,13 +351,6 @@ and then all platforms are built automatically.
 * prunner always enables authentication via JWT
 * An application that wants to embed prunner should read the shared secret and generate a JWT auth token for accessing the API by
   doing internal HTTP requests. This way custom policies can be implemented for ensuring access to prunner.
-
-### UI
-
-* Show auth errors in UI
-
-* Idea: content ranges for polling streams
-
 
 ## License
 
