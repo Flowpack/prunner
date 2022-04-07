@@ -181,8 +181,18 @@ func appAction(c *cli.Context) error {
 		return errors.Wrap(err, "building pipeline runner store")
 	}
 
+	// How signals are handled:
+	// - SIGINT: Shutdown gracefully and wait for jobs to be finished completely
+	// - SIGTERM: Cancel running jobs
+
+	gracefulShutdownCtx, gracefulCancel := signal.NotifyContext(c.Context, syscall.SIGINT, syscall.SIGTERM)
+	defer gracefulCancel()
+	// Cancel the shutdown context on SIGTERM to prevent waiting for jobs and client connections
+	forcedShutdownCtx, forcedCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
+	defer forcedCancel()
+
 	// Set up pipeline runner
-	pRunner, err := prunner.NewPipelineRunner(c.Context, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(gracefulShutdownCtx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		// taskctl.NewTaskRunner never actually returns an error
 		taskRunner, _ := taskctl.NewTaskRunner(outputStore, taskctl.WithEnv(variables.FromMap(j.Env)))
 
@@ -219,24 +229,14 @@ func appAction(c *cli.Context) error {
 		}
 	}()
 
-	// How signals are handled:
-	// - SIGINT: Shutdown gracefully and wait for jobs to be finished completely
-	// - SIGTERM: Cancel running jobs
-
-	ctx, cancel := signal.NotifyContext(c.Context, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	// Cancel the shutdown context on SIGTERM to prevent waiting for jobs and client connections
-	shutdownCtx, shutdownCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
-	defer shutdownCancel()
-
 	// Wait for SIGINT or SIGTERM
-	<-ctx.Done()
+	<-gracefulShutdownCtx.Done()
 
 	log.Info("Received signal, waiting until jobs are finished...")
-	_ = pRunner.Shutdown(shutdownCtx)
+	_ = pRunner.Shutdown(forcedShutdownCtx)
 
 	log.Debugf("Shutting down HTTP API...")
-	_ = httpSrv.Shutdown(shutdownCtx)
+	_ = httpSrv.Shutdown(forcedShutdownCtx)
 
 	log.Info("Shutdown complete")
 
