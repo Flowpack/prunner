@@ -47,6 +47,11 @@ type PipelineRunner struct {
 
 	// Wait group for waiting for asynchronous operations like job.Cancel
 	wg sync.WaitGroup
+	// Flag if the runner is shutting down
+	isShuttingDown bool
+
+	// Poll interval for completed jobs for graceful shutdown
+	ShutdownPollInterval time.Duration
 }
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
@@ -61,9 +66,10 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		waitListByPipeline: make(map[string][]*PipelineJob),
 		store:              store,
 		outputStore:        outputStore,
-		// Use channel buffered with one extra slot so we can keep save requests while a save is running without blocking
-		persistRequests:  make(chan struct{}, 1),
-		createTaskRunner: createTaskRunner,
+		// Use channel buffered with one extra slot, so we can keep save requests while a save is running without blocking
+		persistRequests:      make(chan struct{}, 1),
+		createTaskRunner:     createTaskRunner,
+		ShutdownPollInterval: 3 * time.Second,
 	}
 
 	if store != nil {
@@ -76,6 +82,9 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 			for {
 				select {
 				case <-ctx.Done():
+					log.
+						WithField("component", "runner").
+						Debug("Stopping persist loop")
 					return
 				case <-pRunner.persistRequests:
 					pRunner.SaveToStore()
@@ -175,10 +184,15 @@ var errQueueFull = errors.New("concurrency exceeded and queue limit reached for 
 var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
 var errJobNotStarted = errors.New("job is not started")
+var ErrShuttingDown = errors.New("runner is shutting down")
 
 func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
+
+	if r.isShuttingDown {
+		return nil, ErrShuttingDown
+	}
 
 	pipelineDef, ok := r.defs.Pipelines[pipeline]
 	if !ok {
@@ -367,7 +381,9 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 	job.Start = &now
 
 	// Run graph asynchronously
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		lastErr := job.sched.Schedule(graph)
 		r.JobCompleted(job.ID, lastErr)
 	}()
@@ -666,8 +682,8 @@ func (r *PipelineRunner) initialLoadFromStore() error {
 				Warnf("Found running job when restoring state, marked as canceled")
 		}
 
-		// Cancel jobs which have been scheduled on wait list but never been started
-		if job.Start == nil {
+		// Cancel jobs which have been scheduled on wait list but never been started or canceled
+		if job.Start == nil && !job.Canceled {
 			job.Canceled = true
 
 			log.
@@ -685,6 +701,9 @@ func (r *PipelineRunner) initialLoadFromStore() error {
 }
 
 func (r *PipelineRunner) SaveToStore() {
+	r.wg.Add(1)
+	defer r.wg.Done()
+
 	log.
 		WithField("component", "runner").
 		Debugf("Saving job state to data store")
@@ -772,6 +791,78 @@ func (r *PipelineRunner) SaveToStore() {
 			WithError(err).
 			Errorf("Error saving job state to data store")
 	}
+}
+
+func (r *PipelineRunner) Shutdown(ctx context.Context) error {
+	defer func() {
+		log.
+			WithField("component", "runner").
+			Debugf("Shutting down, waiting for pending operations...")
+		// Wait for all running jobs to have called JobCompleted
+		r.wg.Wait()
+
+		// Do a final save to include the state of recently completed jobs
+		r.SaveToStore()
+	}()
+
+	r.mx.Lock()
+	r.isShuttingDown = true
+	// Cancel all jobs on wait list
+	for pipelineName, jobs := range r.waitListByPipeline {
+		for _, job := range jobs {
+			job.Canceled = true
+			log.
+				WithField("component", "runner").
+				WithField("jobID", job.ID).
+				WithField("pipeline", pipelineName).
+				Warnf("Shutting down, marking job on wait list as canceled")
+		}
+		delete(r.waitListByPipeline, pipelineName)
+	}
+	r.mx.Unlock()
+
+	for {
+		// Poll pipelines to check for running jobs
+		r.mx.RLock()
+		hasRunningPipelines := false
+		for pipelineName := range r.jobsByPipeline {
+			if r.isRunning(pipelineName) {
+				hasRunningPipelines = true
+				log.
+					WithField("component", "runner").
+					WithField("pipeline", pipelineName).
+					Debugf("Shutting down, waiting for pipeline to finish...")
+			}
+		}
+		r.mx.RUnlock()
+
+		if !hasRunningPipelines {
+			log.
+				WithField("component", "runner").
+				Debugf("Shutting down, all pipelines finished")
+			break
+		}
+
+		// Wait a few seconds before checking pipeline status again, or cancel jobs if the context is done
+		select {
+		case <-time.After(r.ShutdownPollInterval):
+		case <-ctx.Done():
+			log.
+				WithField("component", "runner").
+				Warnf("Forced shutdown, cancelling all jobs")
+
+			r.mx.Lock()
+
+			for jobID := range r.jobsByID {
+				_ = r.cancelJobInternal(jobID)
+			}
+			r.mx.Unlock()
+
+			return ctx.Err()
+		}
+	}
+
+	return nil
 }
 
 // taken from https://stackoverflow.com/a/37335777

@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
+	"syscall"
 
 	"github.com/apex/log"
 	logfmt_handler "github.com/apex/log/handlers/logfmt"
@@ -174,13 +176,23 @@ func appAction(c *cli.Context) error {
 		return errors.Wrap(err, "building output store")
 	}
 
-	store, err := store.NewJSONDataStore(path.Join(c.String("data")))
+	dataStore, err := store.NewJSONDataStore(path.Join(c.String("data")))
 	if err != nil {
 		return errors.Wrap(err, "building pipeline runner store")
 	}
 
+	// How signals are handled:
+	// - SIGINT: Shutdown gracefully and wait for jobs to be finished completely
+	// - SIGTERM: Cancel running jobs
+
+	gracefulShutdownCtx, gracefulCancel := signal.NotifyContext(c.Context, syscall.SIGINT, syscall.SIGTERM)
+	defer gracefulCancel()
+	// Cancel the shutdown context on SIGTERM to prevent waiting for jobs and client connections
+	forcedShutdownCtx, forcedCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
+	defer forcedCancel()
+
 	// Set up pipeline runner
-	pRunner, err := prunner.NewPipelineRunner(c.Context, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(gracefulShutdownCtx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		// taskctl.NewTaskRunner never actually returns an error
 		taskRunner, _ := taskctl.NewTaskRunner(outputStore, taskctl.WithEnv(variables.FromMap(j.Env)))
 
@@ -189,7 +201,7 @@ func appAction(c *cli.Context) error {
 		taskRunner.Stderr = io.Discard
 
 		return taskRunner
-	}, store, outputStore)
+	}, dataStore, outputStore)
 	if err != nil {
 		return err
 	}
@@ -202,10 +214,33 @@ func appAction(c *cli.Context) error {
 	)
 
 	// Set up a simple REST API for listing jobs and scheduling pipelines
-
+	address := c.String("address")
 	log.
-		Infof("HTTP API Listening on %s", c.String("address"))
-	return http.ListenAndServe(c.String("address"), srv)
+		Infof("HTTP API listening on %s", address)
+
+	// Start http server and handle graceful shutdown
+	httpSrv := http.Server{
+		Addr:    address,
+		Handler: srv,
+	}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Error starting HTTP API: %s", err)
+		}
+	}()
+
+	// Wait for SIGINT or SIGTERM
+	<-gracefulShutdownCtx.Done()
+
+	log.Info("Received signal, waiting until jobs are finished...")
+	_ = pRunner.Shutdown(forcedShutdownCtx)
+
+	log.Debugf("Shutting down HTTP API...")
+	_ = httpSrv.Shutdown(forcedShutdownCtx)
+
+	log.Info("Shutdown complete")
+
+	return nil
 }
 
 func createLogFormatter(c *cli.Context) middleware.LogFormatter {

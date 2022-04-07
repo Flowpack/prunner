@@ -175,7 +175,7 @@ func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
 				Concurrency: 1,
 				QueueLimit:  nil,
 				Env: map[string]string{
-					"MY_VAR": "from pipeline",
+					"MY_VAR":    "from pipeline",
 					"OTHER_VAR": "from pipeline",
 				},
 				Tasks: map[string]definition.TaskDef{
@@ -746,7 +746,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillNotRunC
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(tsk *task.Task) error {
-				time.Sleep(100*time.Millisecond)
+				time.Sleep(100 * time.Millisecond)
 				return nil
 			},
 		}
@@ -785,6 +785,113 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillNotRunC
 		})
 		require.False(t, running, "job1 must not be running after job2 started")
 	}
+}
+
+func TestPipelineRunner_Shutdown_WithRunningJob_Graceful(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"long_running": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"sleep": {
+						Script: []string{"sleep 10"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		jobFinished bool
+		jobCanceled bool
+	)
+
+	store := test.NewMockStore()
+
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(tsk *task.Task) error {
+				time.Sleep(100 * time.Millisecond)
+				jobFinished = true
+				return nil
+			},
+			OnCancel: func() {
+				jobCanceled = true
+			},
+		}
+	}, store, test.NewMockOutputStore())
+	pRunner.ShutdownPollInterval = 100 * time.Millisecond
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+
+	waitForStartedJobTask(t, pRunner, jobID, "sleep")
+
+	shutdownCtx := context.Background()
+
+	err = pRunner.Shutdown(shutdownCtx)
+	require.NoError(t, err)
+
+	assert.False(t, job.Canceled, "job was not marked as canceled")
+	assert.True(t, jobFinished, "job was finished by runner")
+	assert.False(t, jobCanceled, "job was not canceled by runner")
+	assert.True(t, job.Completed, "job was marked as completed")
+}
+
+func TestPipelineRunner_Shutdown_WithRunningJob_Forced(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"long_running": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"sleep": {
+						Script: []string{"sleep 1"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(test.NewMockOutputStore())
+		return taskRunner
+	}, store, test.NewMockOutputStore())
+	pRunner.ShutdownPollInterval = 100 * time.Millisecond
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("long_running", ScheduleOpts{})
+	require.NoError(t, err)
+
+	jobID := job.ID
+
+	waitForStartedJobTask(t, pRunner, jobID, "sleep")
+
+	// Force cancel of job after 100ms
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer shutdownCancel()
+
+	err = pRunner.Shutdown(shutdownCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	assert.True(t, job.Canceled, "job was marked as canceled")
 }
 
 func intPtr(i int) *int {

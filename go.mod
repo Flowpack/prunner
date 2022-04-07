@@ -13,11 +13,11 @@ require (
 	github.com/liamylian/jsontime/v2 v2.0.0
 	github.com/mattn/go-isatty v0.0.14
 	github.com/mattn/go-zglob v0.0.3
-	github.com/sirupsen/logrus v1.8.1
 	github.com/stretchr/testify v1.7.1
 	github.com/taskctl/taskctl v1.3.1-0.20210426182424-d8747985c906
 	github.com/urfave/cli/v2 v2.4.0
 	gopkg.in/yaml.v2 v2.4.0
+	mvdan.cc/sh/v3 v3.4.3
 )
 
 require (
@@ -42,6 +42,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/sirupsen/logrus v1.8.1 // indirect
 	golang.org/x/crypto v0.0.0-20220331220935-ae2d96664a29 // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
 	golang.org/x/sys v0.0.0-20220403205710-6acee93ad0eb // indirect
@@ -49,5 +50,4 @@ require (
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/check.v1 v1.0.0-20200227125254-8fa46927fb4f // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
-	mvdan.cc/sh/v3 v3.4.3 // indirect
 )
