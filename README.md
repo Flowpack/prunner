@@ -283,7 +283,8 @@ Prunner will reload pipeline definitions from disk when a SIGUSR1 signal is rece
 A watch mode that polls the files for changes can be enabled with the `--watch` flag. The poll interval is configurable
 via `--poll-interval`.
 
-Note: A running pipeline job and completed jobs are not changed when the definitions are reloaded.
+> Note: Only newly scheduled jobs use the updated definitions. Running jobs and jobs that are queued for execution
+continue to use the old definition.
 
 ### Persistent job state
 
