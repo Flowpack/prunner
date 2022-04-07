@@ -346,6 +346,7 @@ GLOBAL OPTIONS:
 Prunner can be started inside a container. There are a few things to consider:
 
 * All tasks are executed in the container where prunner is running. Make sure to use a base image with the necessary dependencies.
+* For graceful shutdown: Use `STOPSIGNAL SIGINT` in a custom docker image that runs prunner or start the docker container via `--stop-signal SIGINT`
 * The data directory (defaults to `.prunner`) should be placed in a volume to persist restarts
 * The dynamic config (defaults to `.prunner.yml`) should be placed in a volume or mounted from an existing file to allow
   clients to generate correct JWT tokens based on the secret.
