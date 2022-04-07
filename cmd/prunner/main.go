@@ -27,6 +27,6 @@ func main() {
 		if strings.HasPrefix(err.Error(), "flag provided but not defined") {
 			os.Exit(1)
 		}
-		log.Fatalf("Error: %v, %T", err, err)
+		log.Fatalf("Error: %v", err)
 	}
 }

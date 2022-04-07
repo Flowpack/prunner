@@ -4,8 +4,6 @@ import (
 	"github.com/apex/log"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/urfave/cli/v2"
-
-	"github.com/Flowpack/prunner/config"
 )
 
 func newDebugCmd() *cli.Command {
@@ -13,7 +11,7 @@ func newDebugCmd() *cli.Command {
 		Name:  "debug",
 		Usage: "Get authorization information for debugging",
 		Action: func(c *cli.Context) error {
-			conf, err := config.LoadOrCreateConfig(c.String("config"))
+			conf, err := loadConfig(c)
 			if err != nil {
 				return err
 			}

@@ -65,9 +65,14 @@ func New(info Info) *cli.App {
 		},
 		&cli.StringFlag{
 			Name:    "config",
-			Usage:   "Config filename (will be created on first run)",
+			Usage:   "Dynamic config filename (will be created on first run if jwt-secret is not set)",
 			Value:   ".prunner.yml",
 			EnvVars: []string{"PRUNNER_CONFIG"},
+		},
+		&cli.StringFlag{
+			Name:    "jwt-secret",
+			Usage:   "Pre-generated shared secret for JWT authentication (at least 16 characters)",
+			EnvVars: []string{"PRUNNER_JWT_SECRET"},
 		},
 		&cli.StringFlag{
 			Name:    "data",
@@ -164,7 +169,7 @@ func loadEnvFile(file string) error {
 
 // appAction is the main function which starts everything including the HTTP server.
 func appAction(c *cli.Context) error {
-	conf, err := config.LoadOrCreateConfig(c.String("config"))
+	conf, err := loadConfig(c)
 	if err != nil {
 		return err
 	}
@@ -303,6 +308,14 @@ func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunn
 			}
 		}
 	}()
+}
+
+func loadConfig(c *cli.Context) (*config.Config, error) {
+	conf, err := config.LoadOrCreateConfig(
+		c.String("config"),
+		config.Config{JWTSecret: c.String("jwt-secret")},
+	)
+	return conf, err
 }
 
 func createLogFormatter(c *cli.Context) middleware.LogFormatter {
