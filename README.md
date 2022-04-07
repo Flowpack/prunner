@@ -270,7 +270,9 @@ its persisted logs and task data is removed automatically on saving to disk.
 Prunner starts child processes with `setpgid` to use a new process group for each task of a pipeline job.
 This means that if a job is cancelled, all child processes are killed - even if they were run by a shell script.
 
-Note: If prunner is killed hard (e.g. SIGKILL) without SIGINT / SIGTERM, the child processes of running jobs will not be terminated.
+> Note: If prunner is killed hard (e.g. SIGKILL) without SIGINT / SIGTERM, the child processes of running jobs will not be terminated.
+
+> Windows support: Process groups are not used, since there is not `setpgid` on Windows.
 
 ### Graceful shutdown
 
@@ -280,6 +282,9 @@ Sending a SIGTERM signal to prunner will cancel all running jobs (and interrupt 
 ### Reloading definitions and watching for changes
 
 Prunner will reload pipeline definitions from disk when a SIGUSR1 signal is received (and if the definitions changed).
+
+> Windows support: There is no SIGUSR1 signal on Windows. You have to use watch mode to reload definitions.
+
 A watch mode that polls the files for changes can be enabled with the `--watch` flag. The poll interval is configurable
 via `--poll-interval`.
 

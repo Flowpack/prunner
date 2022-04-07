@@ -286,7 +286,8 @@ func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunn
 		defer t.Stop()
 
 		notifyReload := make(chan os.Signal, 1)
-		signal.Notify(notifyReload, syscall.SIGUSR1)
+		defer close(notifyReload)
+		notifyReloadSignal(notifyReload)
 
 		for {
 			select {
