@@ -16,6 +16,13 @@
 
 This is NOT a fully featured CI pipeline solution.
 
+## Badges
+
+[![Release](https://img.shields.io/github/release/Flowpack/prunner.svg?style=for-the-badge)](https://github.com/Flowpack/prunner/releases/latest)
+[![Software License](https://img.shields.io/badge/license-GPLv3-brightgreen.svg?style=for-the-badge)](/LICENSE)
+[![Build status](https://img.shields.io/github/workflow/status/Flowpack/prunner/run%20tests?style=for-the-badge)](https://github.com/Flowpack/prunner/actions?workflow=run%20tests)
+[![Coverage](https://img.shields.io/coveralls/github/Flowpack/prunner.svg?style=for-the-badge)](https://coveralls.io/github/Flowpack/prunner)
+
 ## Components
 
 ### [prunner](https://github.com/Flowpack/prunner) (this repository)
