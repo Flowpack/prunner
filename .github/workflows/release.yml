@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
@@ -15,6 +19,9 @@ jobs:
         with:
           fetch-depth: 0
       -
+        name: Fetch all tags
+        run: git fetch --force --tags
+      -
         name: Set up Go
         uses: actions/setup-go@v2
         with:
@@ -23,7 +30,6 @@ jobs:
         name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v2
         with:
-          # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser
           version: latest
           args: release --rm-dist

@@ -14,9 +14,11 @@ type Config struct {
 	JWTSecret string `yaml:"jwt_secret"`
 }
 
+var ErrMissingJWTSecret = errors.New("missing jwt_secret")
+
 func (c Config) validate() error {
 	if c.JWTSecret == "" {
-		return errors.New("missing jwt_secret")
+		return ErrMissingJWTSecret
 	}
 	const minJWTSecretLength = 16
 	if len(c.JWTSecret) < minJWTSecretLength {
@@ -26,7 +28,15 @@ func (c Config) validate() error {
 	return nil
 }
 
-func LoadOrCreateConfig(configPath string) (*Config, error) {
+func LoadOrCreateConfig(configPath string, cliConfig Config) (*Config, error) {
+	if err := cliConfig.validate(); err == nil {
+		log.Debug("Using config from CLI")
+		return &cliConfig, nil
+	} else if err != ErrMissingJWTSecret {
+		return nil, errors.Wrap(err, "invalid CLI config")
+	}
+
+	log.Debugf("Reading config from %s", configPath)
 	f, err := os.Open(configPath)
 	if os.IsNotExist(err) {
 		log.Infof("No config found, creating file at %s", configPath)

@@ -35,9 +35,10 @@ A Neos/Flow PHP package providing a backend module embedding prunner-ui and a PH
 
 ### Main concepts
 
-prunner controls a set of *pipelines*, which are defined in *YAML* files (typically `pipelines.yml`).
+Prunner controls a set of *pipelines*, which are defined in *YAML* files (typically `pipelines.yml`).
 The pipelines consist of *tasks*, which are executed as part of the pipeline. Each task has a `script`
-which are the CLI commands executed when the task is run.
+which are the commands executed when the task is run. A pipeline can be scheduled as a *job* via the REST API.
+Depending on the definition it is started immediately or put on a wait list.
 
 ### A simple pipeline
 
@@ -293,6 +294,59 @@ continue to use the old definition.
 
 ### Persistent job state
 
+The state of pipeline jobs is persisted to disk in the `.prunner` directory regularly.
+The directory can be configured via the `--data` flag.
+Logs for script output (STDERR and STDOUT) of tasks are stored in the `[data]/logs` directory.
+
+## Running prunner
+
+Since prunner is only a single binary, it can be easily deployed and run in a variety of environments.
+It is designed to run in the foreground and output logs to STDERR and generally follows the rules of a [twelve-factor](https://12factor.net) app.
+
+### CLI Reference
+
+```
+NAME:
+   prunner - Pipeline runner
+
+USAGE:
+   prunner [global options] command [command options] [arguments...]
+
+COMMANDS:
+   debug    Get authorization information for debugging
+   version  Print the current version
+   help, h  Shows a list of commands or help for one command
+
+GLOBAL OPTIONS:
+   --verbose, -v          Enable verbose log output (default: false) [$PRUNNER_VERBOSE]
+   --disable-ansi         Force disable ANSI log output and output log in logfmt format (default: false) [$PRUNNER_DISABLE_ANSI]
+   --config value         Dynamic config filename (will be created on first run if jwt-secret is not set) (default: ".prunner.yml") [$PRUNNER_CONFIG]
+   --jwt-secret value     Pre-generated shared secret for JWT authentication (at least 16 characters) [$PRUNNER_JWT_SECRET]
+   --data value           Base directory to use for storing data (metadata and job outputs) (default: ".prunner") [$PRUNNER_DATA]
+   --pattern value        Search pattern (glob) for pipeline configuration scan (default: "**/pipelines.{yml,yaml}") [$PRUNNER_PATTERN]
+   --path value           Base directory to use for pipeline configuration scan (default: ".") [$PRUNNER_PATH]
+   --address value        Listen address for HTTP API (default: "localhost:9009") [$PRUNNER_ADDRESS]
+   --env-files value      Filenames with environment variables to load (dotenv style), will override existing env vars, set empty to skip loading (default: ".env", ".env.local")  (accepts multiple inputs) [$PRUNNER_ENV_FILES]
+   --watch                Watch for pipeline configuration changes and reload them (default: false) [$PRUNNER_WATCH]
+   --poll-interval value  Poll interval for pipeline configuration changes (if watch is enabled) (default: 30s) [$PRUNNER_POLL_INTERVAL]
+   --help, -h             show help (default: false)
+```
+
+> Note: Options can be passed as command line flags or as environment variables.
+
+### Docker
+
+Prunner can be started inside a container. There are a few things to consider:
+
+* All tasks are executed in the container where prunner is running. Make sure to use a base image with the necessary dependencies.
+* The data directory (defaults to `.prunner`) should be placed in a volume to persist restarts
+* The dynamic config (defaults to `.prunner.yml`) should be placed in a volume or mounted from an existing file to allow
+  clients to generate correct JWT tokens based on the secret.
+* Alternatively a pre-generated secret can be passed via the `PRUNNER_JWT_SECRET` env var
+  and shared with applications accessing the API.
+* The `--address` flag should be set to listen on all interfaces (.e.g. `:9009`) or a specific network address. 
+  This allows to access the API from outside the container.
+
 ## Development
 
 ### Requirements
@@ -362,9 +416,11 @@ and then all platforms are built automatically.
 ## Security concept
 
 * The HTTP server only listens on localhost by default
-* prunner always enables authentication via JWT
-* An application that wants to embed prunner should read the shared secret and generate a JWT auth token for accessing the API by
-  doing internal HTTP requests. This way custom policies can be implemented for ensuring access to prunner.
+* Prunner always enables authentication via JWT (HS256), a random shared secret is generated in the dynamic config file (`.prunner.yml` by default) if it does not exist
+* An application that wants to embed prunner should read the shared secret (`jwt_secret`) and generate a JWT auth token for accessing the API
+* The JWT secret can alternatively be passed via env var (`PRUNNER_JWT_SECRET`) (passing via flag is not recommended)
+* The HTTP API of prunner should not be exposed directly to the outside, but requests should be forwarded by the application embedding prunner.
+  This way custom policies can be implemented in the consumer app for ensuring/limiting access to prunner.
 
 ## License
 
