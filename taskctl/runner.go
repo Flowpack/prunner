@@ -221,9 +221,6 @@ func (r *TaskRunner) Cancel() {
 	r.cancelMutex.Lock()
 	if !r.canceling {
 		r.canceling = true
-		defer log.
-			WithField("component", "runner").
-			Debug("Task runner has been cancelled")
 		r.cancelFunc()
 	}
 	r.cancelMutex.Unlock()

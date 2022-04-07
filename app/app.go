@@ -194,8 +194,18 @@ func appAction(c *cli.Context) error {
 		return errors.Wrap(err, "building pipeline runner store")
 	}
 
+	// How signals are handled:
+	// - SIGINT: Shutdown gracefully and wait for jobs to be finished completely
+	// - SIGTERM: Cancel running jobs
+
+	gracefulShutdownCtx, gracefulCancel := signal.NotifyContext(c.Context, syscall.SIGINT, syscall.SIGTERM)
+	defer gracefulCancel()
+	// Cancel the shutdown context on SIGTERM to prevent waiting for jobs and client connections
+	forcedShutdownCtx, forcedCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
+	defer forcedCancel()
+
 	// Set up pipeline runner
-	pRunner, err := prunner.NewPipelineRunner(c.Context, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+	pRunner, err := prunner.NewPipelineRunner(gracefulShutdownCtx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
 		// taskctl.NewTaskRunner never actually returns an error
 		taskRunner, _ := taskctl.NewTaskRunner(outputStore, taskctl.WithEnv(variables.FromMap(j.Env)))
 
@@ -208,6 +218,8 @@ func appAction(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+
+	handleDefinitionChanges(gracefulShutdownCtx, c, pRunner, defs)
 
 	srv := server.NewServer(
 		pRunner,
@@ -232,33 +244,21 @@ func appAction(c *cli.Context) error {
 		}
 	}()
 
-	// How signals are handled:
-	// - SIGINT: Shutdown gracefully and wait for jobs to be finished completely
-	// - SIGTERM: Cancel running jobs
-
-	ctx, cancel := signal.NotifyContext(c.Context, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	// Cancel the shutdown context on SIGTERM to prevent waiting for jobs and client connections
-	shutdownCtx, shutdownCancel := signal.NotifyContext(c.Context, syscall.SIGTERM)
-	defer shutdownCancel()
-
-	handleDefinitionChanges(ctx, c, pRunner, &defs)
-
 	// Wait for SIGINT or SIGTERM
-	<-ctx.Done()
+	<-gracefulShutdownCtx.Done()
 
 	log.Info("Received signal, waiting until jobs are finished...")
-	_ = pRunner.Shutdown(shutdownCtx)
+	_ = pRunner.Shutdown(forcedShutdownCtx)
 
 	log.Debugf("Shutting down HTTP API...")
-	_ = httpSrv.Shutdown(shutdownCtx)
+	_ = httpSrv.Shutdown(forcedShutdownCtx)
 
 	log.Info("Shutdown complete")
 
 	return nil
 }
 
-func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunner.PipelineRunner, defs **definition.PipelinesDef) {
+func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunner.PipelineRunner, defs *definition.PipelinesDef) {
 	reloadDefinitions := func() {
 		newDefs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
 		if err != nil {
@@ -266,15 +266,15 @@ func handleDefinitionChanges(ctx context.Context, c *cli.Context, pRunner *prunn
 			return
 		}
 
-		if (*defs).Equals(*newDefs) {
+		if defs.Equals(*newDefs) {
 			log.Debug("Reloading pipeline definitions: no changes detected")
 			return
 		}
-		*defs = newDefs
-		pRunner.ReplaceDefinitions(*defs)
+		defs = newDefs
+		pRunner.ReplaceDefinitions(defs)
 		log.
-			WithField("pipelines", (*defs).Pipelines.NamesWithSourcePath()).
-			Infof("Definitions changed, loaded %d pipelines", len((*defs).Pipelines))
+			WithField("pipelines", defs.Pipelines.NamesWithSourcePath()).
+			Infof("Definitions changed, loaded %d pipelines", len(defs.Pipelines))
 	}
 
 	watchEnabled := c.Bool("watch")

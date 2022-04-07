@@ -156,7 +156,7 @@ func (e *PgidExecutor) Execute(ctx context.Context, job *executor.Job) ([]byte, 
 	log.
 		WithField("component", "executor").
 		WithField("jobID", jobID).
-		Debugf("Executing \"%s\"", command)
+		Debugf("Executing %q", command)
 
 	e.interp.Dir = job.Dir
 	e.interp.Env = expand.ListEnviron(env...)

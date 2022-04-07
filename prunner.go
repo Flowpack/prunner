@@ -82,7 +82,9 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 			for {
 				select {
 				case <-ctx.Done():
-					log.Debugf("PipelineRunner: context done, stopping persist loop")
+					log.
+						WithField("component", "runner").
+						Debug("Stopping persist loop")
 					return
 				case <-pRunner.persistRequests:
 					pRunner.SaveToStore()
@@ -794,10 +796,11 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		log.
 			WithField("component", "runner").
 			Debugf("Shutting down, waiting for pending operations...")
+		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
-		// Do a final save to include recently completed jobs
+
+		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
-		r.wg.Wait()
 	}()
 
 	r.mx.Lock()
