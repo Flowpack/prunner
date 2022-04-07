@@ -21,7 +21,7 @@ archives:
       amd64: x86_64
 dockers:
   - image_templates:
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
     dockerfile: Dockerfile
     build_flag_templates:
       - --platform=linux/amd64
@@ -34,7 +34,7 @@ dockers:
       - --label=org.opencontainers.image.revision={{ .FullCommit }}
       - --label=org.opencontainers.image.licenses=GPL-3.0
   - image_templates:
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
     goarch: arm64
     dockerfile: Dockerfile
     build_flag_templates:
@@ -48,14 +48,14 @@ dockers:
       - --label=org.opencontainers.image.revision={{ .FullCommit }}
       - --label=org.opencontainers.image.licenses=GPL-3.0
 docker_manifests:
-  - name_template: ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}
+  - name_template: ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}
     image_templates:
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
-  - name_template: ghcr.io/Flowpack/{{ .ProjectName }}:latest
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
+  - name_template: ghcr.io/flowpack/{{ .ProjectName }}:latest
     image_templates:
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
-      - ghcr.io/Flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
+      - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
 checksum:
   name_template: 'checksums.txt'
 snapshot:
