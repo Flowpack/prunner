@@ -277,6 +277,15 @@ Note: If prunner is killed hard (e.g. SIGKILL) without SIGINT / SIGTERM, the chi
 Prunner will handle a SIGINT signal and perform a graceful shutdown and wait for all running jobs to be completed.
 Sending a SIGTERM signal to prunner will cancel all running jobs (and interrupt / kill child processes).
 
+### Reloading definitions and watching for changes
+
+Prunner will reload pipeline definitions from disk when a SIGUSR1 signal is received (and if the definitions changed).
+A watch mode that polls the files for changes can be enabled with the `--watch` flag. The poll interval is configurable
+via `--poll-interval`.
+
+> Note: Only newly scheduled jobs use the updated definitions. Running jobs and jobs that are queued for execution
+continue to use the old definition.
+
 ### Persistent job state
 
 ## Development
