@@ -33,7 +33,7 @@ type server struct {
 	outputStore taskctl.OutputStore
 }
 
-func NewServer(pRunner *prunner.PipelineRunner, outputStore taskctl.OutputStore, logger func(http.Handler) http.Handler, tokenAuth *jwtauth.JWTAuth) *server {
+func NewServer(pRunner *prunner.PipelineRunner, outputStore taskctl.OutputStore, logger func(http.Handler) http.Handler, tokenAuth *jwtauth.JWTAuth, enableProfiling bool) *server {
 	srv := &server{
 		pRunner:     pRunner,
 		outputStore: outputStore,
@@ -42,21 +42,30 @@ func NewServer(pRunner *prunner.PipelineRunner, outputStore taskctl.OutputStore,
 	r := chi.NewRouter()
 	r.Use(logger)
 	r.Use(middleware.Recoverer)
-	// Seek, verify and validate JWT tokens
-	r.Use(jwtauth.Verifier(tokenAuth))
-	// Handle valid / invalid tokens
-	r.Use(jwtauth.Authenticator)
 
-	r.Route("/pipelines", func(r chi.Router) {
-		r.Get("/", srv.pipelines)
-		r.Get("/jobs", srv.pipelinesJobs)
-		r.Post("/schedule", srv.pipelinesSchedule)
+	// we do not want JWT authentication for /debug/pprof,
+	// that's why we need to create a new handler group (to scope the authentication middlewares)
+	r.Group(func(r chi.Router) {
+		// Seek, verify and validate JWT tokens
+		r.Use(jwtauth.Verifier(tokenAuth))
+		// Handle valid / invalid tokens
+		r.Use(jwtauth.Authenticator)
+
+		r.Route("/pipelines", func(r chi.Router) {
+			r.Get("/", srv.pipelines)
+			r.Get("/jobs", srv.pipelinesJobs)
+			r.Post("/schedule", srv.pipelinesSchedule)
+		})
+		r.Route("/job", func(r chi.Router) {
+			r.Get("/detail", srv.jobDetail)
+			r.Get("/logs", srv.jobLogs)
+			r.Post("/cancel", srv.jobCancel)
+		})
 	})
-	r.Route("/job", func(r chi.Router) {
-		r.Get("/detail", srv.jobDetail)
-		r.Get("/logs", srv.jobLogs)
-		r.Post("/cancel", srv.jobCancel)
-	})
+
+	if enableProfiling {
+		r.Mount("/debug", middleware.Profiler())
+	}
 
 	srv.handler = r
 

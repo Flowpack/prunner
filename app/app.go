@@ -58,6 +58,12 @@ func New(info Info) *cli.App {
 			EnvVars: []string{"PRUNNER_VERBOSE"},
 		},
 		&cli.BoolFlag{
+			Name:    "enable-profiling",
+			Usage:   "Enable the Profiling endpoints underneath /debug/pprof",
+			Value:   false,
+			EnvVars: []string{"PRUNNER_ENABLE_PROFILING"},
+		},
+		&cli.BoolFlag{
 			Name:    "disable-ansi",
 			Usage:   "Force disable ANSI log output and output log in logfmt format",
 			EnvVars: []string{"PRUNNER_DISABLE_ANSI"},
@@ -231,6 +237,7 @@ func appAction(c *cli.Context) error {
 		outputStore,
 		middleware.RequestLogger(createLogFormatter(c)),
 		tokenAuth,
+		c.Bool("enable-profiling"),
 	)
 
 	// Set up a simple REST API for listing jobs and scheduling pipelines
