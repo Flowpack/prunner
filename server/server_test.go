@@ -69,7 +69,7 @@ func TestServer_Pipelines(t *testing.T) {
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -91,6 +91,34 @@ func TestServer_Pipelines(t *testing.T) {
 	}`, rec.Body.String())
 }
 
+func TestServer_PipelinesCanNotBeAccessedWithWrongJwtToken(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+		return &test.MockRunner{}
+	}, nil, nil)
+	require.NoError(t, err)
+
+	outputStore := test.NewMockOutputStore()
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
+
+	wrongTokenAuthClient := jwtauth.New("HS256", []byte("THIS-IS-WRONG"), nil)
+	claims := make(map[string]interface{})
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := wrongTokenAuthClient.Encode(claims)
+
+	req := httptest.NewRequest("GET", "/pipelines", nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 func TestServer_PipelinesSchedule(t *testing.T) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
@@ -104,7 +132,7 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -152,7 +180,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -220,7 +248,7 @@ func TestServer_JobCancel(t *testing.T) {
 
 	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
-	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth)
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
 
 	claims := make(map[string]interface{})
 	jwtauth.SetIssuedNow(claims)
@@ -267,4 +295,51 @@ func TestServer_JobCancel(t *testing.T) {
 		return completed
 
 	}, 50*time.Millisecond, "job exists and was completed")
+}
+
+func TestServer_NoAccessToProfilingRoutesIfDisabled(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+		return &test.MockRunner{}
+	}, nil, nil)
+	require.NoError(t, err)
+
+	outputStore := test.NewMockOutputStore()
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
+
+	req := httptest.NewRequest("GET", "/debug/pprof", nil)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestServer_AccessToProfilingWorksIfEnabledWithoutToken(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+		return &test.MockRunner{}
+	}, nil, nil)
+	require.NoError(t, err)
+
+	outputStore := test.NewMockOutputStore()
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	// !!! the last parameter is "enableProfiling: true"
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, true)
+
+	req := httptest.NewRequest("GET", "/debug/pprof/", nil)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
 }
