@@ -16,6 +16,44 @@
 
 This is NOT a fully featured CI pipeline solution.
 
+<!-- TOC -->
+  * [Badges](#badges)
+  * [Components](#components)
+    * [prunner (this repository)](#prunner--this-repository-)
+    * [prunner-ui](#prunner-ui)
+    * [Flowpack.Prunner](#flowpackprunner)
+  * [User guide](#user-guide)
+    * [Main concepts](#main-concepts)
+    * [A simple pipeline](#a-simple-pipeline)
+    * [Task dependencies](#task-dependencies)
+    * [Job variables](#job-variables)
+    * [Environment variables](#environment-variables)
+      * [Dotenv files](#dotenv-files)
+    * [Limiting concurrency](#limiting-concurrency)
+    * [The wait list](#the-wait-list)
+    * [Debounce jobs with a start delay](#debounce-jobs-with-a-start-delay)
+    * [Disabling fail-fast behavior](#disabling-fail-fast-behavior)
+    * [Configuring retention period](#configuring-retention-period)
+    * [Handling of child processes](#handling-of-child-processes)
+    * [Graceful shutdown](#graceful-shutdown)
+    * [Reloading definitions and watching for changes](#reloading-definitions-and-watching-for-changes)
+    * [Persistent job state](#persistent-job-state)
+  * [Running prunner](#running-prunner)
+    * [CLI Reference](#cli-reference)
+    * [Docker](#docker)
+  * [Development](#development)
+    * [Requirements](#requirements)
+    * [Running locally](#running-locally)
+    * [IDE Setup (IntelliJ/GoLand)](#ide-setup--intellijgoland-)
+    * [Building for different operating systems.](#building-for-different-operating-systems)
+    * [Running Tests](#running-tests)
+    * [Memory Leak Debugging](#memory-leak-debugging)
+    * [Generate OpenAPI (Swagger) spec](#generate-openapi--swagger--spec)
+    * [Releasing](#releasing)
+  * [Security concept](#security-concept)
+  * [License](#license)
+<!-- TOC -->
+
 ## Badges
 
 [![Release](https://img.shields.io/github/release/Flowpack/prunner.svg?style=for-the-badge)](https://github.com/Flowpack/prunner/releases/latest)
@@ -375,6 +413,25 @@ For interacting with the API, you need a JWT token which you can generate for de
 ```bash
 go run ./cmd/prunner debug
 ```
+### IDE Setup (IntelliJ/GoLand)
+
+- Please install [Go](https://plugins.jetbrains.com/plugin/9568-go) Plugin in IntelliJ.
+- In the Settings of IntelliJ: Activate `Languages & Frameworks -> Go -> Go Modules` - `Enable Go Modules Integration`
+- Open a Go File. At the top of the screen the following message appears: `GOROOT is not defined` -> `Setup GOROOT` -> `/usr/local/opt/go/libexec`
+- If autocompletion / syntax check shows lots of things red, try the following two steps:
+  - restart the IDE
+  - if this does not help, `File -> Invalidate Caches`
+
+- Run / Debug in IDE:
+    - `Run -> Edit Configurations`
+    - `Add new Run Configuration` -> `Go Build`
+    - Files: `.../cmd/prunner/main.go`
+    - Working Directory: `.../`
+
+- Tests:
+    - `Run -> Edit Configurations`
+    - `Add new Run Configuration` -> `Go Test`
+    - Test Kind: Package (otherwise you cannot set breakpoints)
 
 ### Building for different operating systems.
 
@@ -405,6 +462,21 @@ Then, to run the linter, use:
 
 ```bash
 golangci-lint run
+```
+
+### Memory Leak Debugging
+
+to find memory leaks, you can run `prunner` in the following way:
+
+```bash
+# start prunner in profiling mode with the config from test/memory_leak_debugging/pipelines.yml
+./dev.sh memory-leak-start
+
+# run a pipeline which creates many MB of log output (possibly multiple times)
+./dev.sh start-pipeline memleak1
+
+# analyze heap dump
+./dev.sh analyze-heapdump
 ```
 
 ### Generate OpenAPI (Swagger) spec

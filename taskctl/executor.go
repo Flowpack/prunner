@@ -1,7 +1,6 @@
 package taskctl
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"os"
@@ -27,7 +26,6 @@ type PgidExecutor struct {
 	dir    string
 	env    []string
 	interp *interp.Runner
-	buf    bytes.Buffer
 }
 
 // NewPgidExecutor creates new pgid executor
@@ -51,8 +49,21 @@ func NewPgidExecutor(stdin io.Reader, stdout, stderr io.Writer, killTimeout time
 	}
 
 	e.interp, err = interp.New(
-		interp.StdIO(stdin, io.MultiWriter(&e.buf, stdout), io.MultiWriter(&e.buf, stderr)),
+		// BEGIN MODIFICATION compared to taskctl/pkg/executor/executor.go
+
+		// in the original TaskRunner code, stdout and stderr are also stored in a Buffer inside e; and then
+		// returned as result of Execute(). This was needed to support the {{.Output}} variable in taskctl,
+		// which contained the output of the previous steps.
+		//
+		// For prunner, this lead to a huge memory leak, where all output was always kept in RAM.
+		//
+		// As we do not need to support the {{.Output}} feature, we can directly send the content to
+		// the stdout/stderr files.
+		interp.StdIO(stdin, stdout, stderr),
+		// we use a custom ExecHandler for overriding the process group handling
 		interp.ExecHandler(createExecHandler(killTimeout)),
+
+		// END MODIFICATION
 	)
 	if err != nil {
 		return nil, err
@@ -81,12 +92,14 @@ func (e *PgidExecutor) Execute(ctx context.Context, job *executor.Job) ([]byte, 
 		job.Dir = e.dir
 	}
 
+	// BEGIN MODIFICATION compared to taskctl/pkg/executor/executor.go
 	jobID := job.Vars.Get(JobIDVariableName).(string)
 
 	log.
 		WithField("component", "executor").
 		WithField("jobID", jobID).
 		Debugf("Executing %q", command)
+	// END MODIFICATION
 
 	e.interp.Dir = job.Dir
 	e.interp.Env = expand.ListEnviron(env...)
@@ -101,13 +114,16 @@ func (e *PgidExecutor) Execute(ctx context.Context, job *executor.Job) ([]byte, 
 		}
 	}()
 
-	offset := e.buf.Len()
+	// BEGIN MODIFICATION compared to taskctl/pkg/executor/executor.go
+	// we disable returning the contents as byte array (needed for {{.Output}} support of
+	// TaskCTL, which we removed because of Memory Leaks)
 	err = e.interp.Run(ctx, cmd)
 	if err != nil {
-		return e.buf.Bytes()[offset:], err
+		return []byte{}, err
 	}
 
-	return e.buf.Bytes()[offset:], nil
+	return []byte{}, nil
+	// END MODIFICATION
 }
 
 func execEnv(env expand.Environ) []string {

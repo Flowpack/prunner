@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,8 +55,6 @@ type TaskRunner struct {
 	killTimeout time.Duration
 }
 
-var _ Runner = &TaskRunner{}
-
 // NewTaskRunner creates new TaskRunner instance
 func NewTaskRunner(outputStore OutputStore, opts ...Opts) (*TaskRunner, error) {
 	r := &TaskRunner{
@@ -105,7 +102,7 @@ func (r *TaskRunner) SetVariables(vars variables.Container) *TaskRunner {
 	return r
 }
 
-// Run run provided task.
+// Run run provided task -> highly modified from taskctl/runner/runner.go
 // TaskRunner first compiles task into linked list of Jobs, then passes those jobs to Executor
 func (r *TaskRunner) Run(t *task.Task) error {
 	// Keep track of running tasks for graceful shutdown and waiting until all tasks are canceled
@@ -165,8 +162,14 @@ func (r *TaskRunner) Run(t *task.Task) error {
 	}
 
 	var (
-		stdoutWriter = []io.Writer{&t.Log.Stdout}
-		stderrWriter = []io.Writer{&t.Log.Stderr}
+		// NOTE: Previously, we also logged to &t.Log.Stdout and &t.Log.Stderr by default,
+		// but this lead to a huge memory leak because the full job output was retained
+		// in memory forever.
+		// This enabled features of taskctl like {{ .Tasks.TASKNAME.Output }} and {{.Output}},
+		// but we never promised these features. Thus it is fine to not log to stdout and stderr
+		// into a Buffer, but directly to a file.
+		stdoutWriter []io.Writer
+		stderrWriter []io.Writer
 	)
 	if r.outputStore != nil {
 		{
@@ -210,7 +213,28 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		if err != nil {
 			return err
 		}
-		r.storeTaskOutput(t)
+
+		// we need to disable storing the task output, as this would lead to numerous problems.
+		// In the original code, r.storeTaskOutput() (from taskctl/runner/runner.go) would be called here.
+		//
+		// Problems why we disabled this:
+		//
+		// - We cannot store task output as environment variable; otherwise we have
+		//   quite serious limits how much we can execute.
+		//   This seems to be the problem https://stackoverflow.com/a/1078125
+		//   "The total size of all the environment variables put together is limited at execve() time.
+		//   See "Limits on size of arguments and environment" at https://man7.org/linux/man-pages/man2/execve.2.html for more information.
+		//   On some systems here, this is around 2 MB (not enough!)
+		//
+		// - We had a Memory Leak in the system, not freeing task.Log.Stdout and task.Log.Stderr.
+		//   For jobs which output lots of data, over time, prunner needed many GBs of RAM because
+		//   of this.
+		//
+		//   That's why we do NOT make the task output available as Go variables
+		//   for next stages (via {{ .Tasks.TASKNAME.Output }} and {{.Output}}).
+		//
+		//   We never promised that these taskctl features would work; so it's fine disabling them.
+
 	}
 
 	return r.after(r.ctx, t, env, vars)
@@ -366,18 +390,6 @@ func (r *TaskRunner) checkTaskCondition(t *task.Task) (bool, error) {
 	return true, nil
 }
 
-func (r *TaskRunner) storeTaskOutput(t *task.Task) {
-	varName := fmt.Sprintf("Tasks.%s.Output", strings.Title(t.Name))
-
-	// we need to disable storing the task output as environment variable; otherwise we have
-	// quite serious limits how much we can execute.
-	// This seems to be the problem https://stackoverflow.com/a/1078125
-	// "The total size of all the environment variables put together is limited at execve() time.
-	// See "Limits on size of arguments and environment" at https://man7.org/linux/man-pages/man2/execve.2.html for more information.
-	// On some systems here, this is around 2 MB (not enough!)
-	r.variables.Set(varName, t.Log.Stdout.String())
-}
-
 func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Job) error {
 	exec, err := NewPgidExecutor(job.Stdin, job.Stdout, job.Stderr, r.killTimeout)
 	if err != nil {
@@ -387,12 +399,15 @@ func (r *TaskRunner) execute(ctx context.Context, t *task.Task, job *executor.Jo
 	t.Start = time.Now()
 	r.notifyTaskChange(t)
 
-	var prevOutput []byte
 	for nextJob := job; nextJob != nil; nextJob = nextJob.Next {
 		var err error
-		nextJob.Vars.Set("Output", string(prevOutput))
-
-		prevOutput, err = exec.Execute(ctx, nextJob)
+		// NOTE: in the original taskctl code, there was a line nextJob.Vars.Set("Output", string(prevOutput))
+		// here, which made {{.Output}} available.
+		// prevOutput was the result of the previous exec.Execute call; but we disabled that feature completely.
+		//
+		// We disable this for memory reasons; as otherwise we had huge memory leaks in prunner because all content
+		// was stored in RAM.
+		_, err = exec.Execute(ctx, nextJob)
 		if err != nil {
 			if status, ok := executor.IsExitStatus(err); ok {
 				t.ExitCode = int16(status)

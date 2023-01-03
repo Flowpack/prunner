@@ -1,9 +1,11 @@
 package app
 
 import (
+	"fmt"
 	"github.com/apex/log"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/urfave/cli/v2"
+	"os"
 )
 
 func newDebugCmd() *cli.Command {
@@ -21,7 +23,12 @@ func newDebugCmd() *cli.Command {
 			claims := make(map[string]interface{})
 			jwtauth.SetIssuedNow(claims)
 			_, tokenString, _ := tokenAuth.Encode(claims)
-			log.Infof("Send the following HTTP header for JWT authorization:\n    Authorization: Bearer %s", tokenString)
+			if os.Getenv("MINIMAL_OUTPUT") == "1" {
+				// for scripting
+				fmt.Printf("Bearer %s", tokenString)
+			} else {
+				log.Infof("Send the following HTTP header for JWT authorization:\n    Authorization: Bearer %s", tokenString)
+			}
 
 			return nil
 		},

@@ -1,0 +1,11 @@
+pipelines:
+  memleak1:
+    tasks:
+      lots_of_console_output:
+        script:
+          # generate 50 MB text
+          - /bin/bash -c "dd if=/dev/random bs=1M  count=50 | base64"
+      test:
+        script:
+          - sleep 2
+        depends_on: [ lots_of_console_output ]
