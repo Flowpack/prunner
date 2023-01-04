@@ -23,6 +23,7 @@ dockers:
   - image_templates:
       - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-amd64
     dockerfile: Dockerfile
+    use: buildx
     build_flag_templates:
       - --platform=linux/amd64
       - --label=org.opencontainers.image.title={{ .ProjectName }}
@@ -37,6 +38,7 @@ dockers:
       - ghcr.io/flowpack/{{ .ProjectName }}:{{ .Version }}-arm64v8
     goarch: arm64
     dockerfile: Dockerfile
+    use: buildx
     build_flag_templates:
       - --platform=linux/arm64/v8
       - --label=org.opencontainers.image.title={{ .ProjectName }}
