@@ -164,9 +164,9 @@ Environment variables are handled in the following places:
 
 ```yaml
 pipelines:
-  env:
-    MY_VAR: set some value for all tasks here
   do_something:
+    env:
+      MY_VAR: set some value for all tasks here
     tasks:
       do_foo:
         script:
