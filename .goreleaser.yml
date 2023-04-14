@@ -11,6 +11,7 @@ builds:
     goarch:
       - amd64
       - arm64
+      - aarch64
     main: ./cmd/prunner
 archives:
   - replacements:
