@@ -137,6 +137,7 @@ func (d PipelineDef) Equals(otherDef PipelineDef) bool {
 			return false
 		}
 	}
+	//nolint:gosimple // Keep the code structure with an explicit if for readability
 	if d.SourcePath != otherDef.SourcePath {
 		return false
 	}
