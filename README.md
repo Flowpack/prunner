@@ -1,4 +1,8 @@
-<img src="docs/prunner-logo-light.png" width="320" align="center">
+<img src="docs/prunner-logo-light.png" alt="prunner" width="320" align="center">
+
+[![GoDoc](https://godoc.org/github.com/Flowpack/prunner?status.svg)](https://godoc.org/github.com/Flowpack/prunner)
+[![Build Status](https://github.com/Flowpack/prunner/workflows/Go/badge.svg)](https://github.com/Flowpack/prunner/actions?workflow=run%20tests)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Flowpack/prunner)](https://goreportcard.com/report/github.com/Flowpack/prunner)
 
 ---
 
@@ -390,7 +394,7 @@ Prunner can be started inside a container. There are a few things to consider:
   clients to generate correct JWT tokens based on the secret.
 * Alternatively a pre-generated secret can be passed via the `PRUNNER_JWT_SECRET` env var
   and shared with applications accessing the API.
-* The `--address` flag should be set to listen on all interfaces (.e.g. `:9009`) or a specific network address. 
+* The `--address` flag should be set to listen on all interfaces (.e.g. `:9009`) or a specific network address.
   This allows to access the API from outside the container.
 
 ## Development
