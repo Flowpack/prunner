@@ -423,3 +423,74 @@ func TestServer_JobLogs(t *testing.T) {
 	assert.NotEmpty(t, logs.Stdout)
 	assert.NotEmpty(t, logs.Stderr)
 }
+
+func TestServer_JobDetail(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	outputStore := test.NewMockOutputStore()
+
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+		return &test.MockRunner{}
+	}, nil, outputStore)
+	require.NoError(t, err)
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
+
+	claims := map[string]interface{}{
+		"sub": "jane.doe",
+	}
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := tokenAuth.Encode(claims)
+
+	req := httptest.NewRequest(http.MethodPost, "/pipelines/schedule", strings.NewReader(`{
+		"pipeline": "release_it"
+	}`))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var result struct{ JobID string }
+	err = json.NewDecoder(rec.Body).Decode(&result)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.JobID)
+	jobID := uuid.Must(uuid.FromString(result.JobID))
+
+	err = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {})
+	require.NoError(t, err)
+
+	// Wait until job is completed (busy waiting style)
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
+	}, 50*time.Millisecond, "job exists and is completed")
+
+	// Get details
+	req = httptest.NewRequest(http.MethodGet, "/job/detail?id="+jobID.String(), nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var details struct {
+		ID        string `json:"id"`
+		Pipeline  string `json:"pipeline"`
+		Completed bool   `json:"completed"`
+		User      string `json:"user"`
+	}
+	err = json.NewDecoder(rec.Body).Decode(&details)
+	require.NoError(t, err)
+
+	assert.Equal(t, jobID.String(), details.ID)
+	assert.Equal(t, "release_it", details.Pipeline)
+	assert.True(t, details.Completed)
+	assert.Equal(t, "jane.doe", details.User)
+}
