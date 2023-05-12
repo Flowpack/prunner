@@ -1,8 +1,9 @@
 <img src="docs/prunner-logo-light.png" alt="prunner" width="320" align="center">
 
 [![GoDoc](https://godoc.org/github.com/Flowpack/prunner?status.svg)](https://godoc.org/github.com/Flowpack/prunner)
-[![Build Status](https://github.com/Flowpack/prunner/workflows/Go/badge.svg)](https://github.com/Flowpack/prunner/actions?workflow=run%20tests)
+[![Build Status](https://github.com/Flowpack/prunner/actions/workflows/test.yml/badge.svg)](https://github.com/Flowpack/prunner/actions/workflows/test.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Flowpack/prunner)](https://goreportcard.com/report/github.com/Flowpack/prunner)
+[![codecov](https://codecov.io/gh/Flowpack/prunner/branch/main/graph/badge.svg?token=RTYBJ3ACPT)](https://codecov.io/gh/Flowpack/prunner)
 
 ---
 
