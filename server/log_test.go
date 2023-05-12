@@ -35,7 +35,7 @@ func TestStructuredLogger(t *testing.T) {
 	h := middleware.RequestLogger(sLogger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Microsecond)
 		w.WriteHeader(200)
-		w.Write([]byte("test"))
+		_, _ = w.Write([]byte("test"))
 	}))
 
 	// mock http response
