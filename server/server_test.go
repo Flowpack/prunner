@@ -75,7 +75,7 @@ func TestServer_Pipelines(t *testing.T) {
 	jwtauth.SetIssuedNow(claims)
 	_, tokenString, _ := tokenAuth.Encode(claims)
 
-	req := httptest.NewRequest("GET", "/pipelines", nil)
+	req := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -111,7 +111,7 @@ func TestServer_PipelinesCanNotBeAccessedWithWrongJwtToken(t *testing.T) {
 	jwtauth.SetIssuedNow(claims)
 	_, tokenString, _ := wrongTokenAuthClient.Encode(claims)
 
-	req := httptest.NewRequest("GET", "/pipelines", nil)
+	req := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -138,7 +138,7 @@ func TestServer_PipelinesSchedule(t *testing.T) {
 	jwtauth.SetIssuedNow(claims)
 	_, tokenString, _ := tokenAuth.Encode(claims)
 
-	req := httptest.NewRequest("POST", "/pipelines/schedule", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/pipelines/schedule", strings.NewReader(`{
 		"pipeline": "release_it"
 	}`))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
@@ -186,7 +186,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	jwtauth.SetIssuedNow(claims)
 	_, tokenString, _ := tokenAuth.Encode(claims)
 
-	req := httptest.NewRequest("POST", "/pipelines/schedule", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/pipelines/schedule", strings.NewReader(`{
 		"pipeline": "release_it"
 	}`))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
@@ -206,7 +206,7 @@ func TestServer_JobCreationTimeIsRoundedForPhpCompatibility(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req = httptest.NewRequest("GET", "/pipelines/jobs", strings.NewReader(""))
+	req = httptest.NewRequest(http.MethodGet, "/pipelines/jobs", strings.NewReader(""))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -256,7 +256,7 @@ func TestServer_JobCancel(t *testing.T) {
 
 	// Schedule pipeline run
 
-	req := httptest.NewRequest("POST", "/pipelines/schedule", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/pipelines/schedule", strings.NewReader(`{
 		"pipeline": "release_it"
 	}`))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
@@ -274,7 +274,7 @@ func TestServer_JobCancel(t *testing.T) {
 
 	// Cancel job
 
-	req = httptest.NewRequest("POST", fmt.Sprintf("/job/cancel?id=%s", result.JobID), nil)
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/job/cancel?id=%s", result.JobID), nil)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -312,7 +312,7 @@ func TestServer_NoAccessToProfilingRoutesIfDisabled(t *testing.T) {
 	noopMiddleware := func(next http.Handler) http.Handler { return next }
 	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
 
-	req := httptest.NewRequest("GET", "/debug/pprof", nil)
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof", nil)
 
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -336,10 +336,90 @@ func TestServer_AccessToProfilingWorksIfEnabledWithoutToken(t *testing.T) {
 	// !!! the last parameter is "enableProfiling: true"
 	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, true)
 
-	req := httptest.NewRequest("GET", "/debug/pprof/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
 
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestServer_JobLogs(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	outputStore := test.NewMockOutputStore()
+
+	pRunner, err := prunner.NewPipelineRunner(ctx, defs, func(j *prunner.PipelineJob) taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(t *task.Task) error {
+				// We make an explicit call to the output store here, since we do not use a real executor for these tests
+				w, err := outputStore.Writer(j.ID.String(), t.Name, "stdout")
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(w, "out from %s", t.Name)
+				w, err = outputStore.Writer(j.ID.String(), t.Name, "stderr")
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(w, "err from %s", t.Name)
+				return nil
+			},
+		}
+	}, nil, outputStore)
+	require.NoError(t, err)
+
+	tokenAuth := jwtauth.New("HS256", []byte("not-very-secret"), nil)
+	noopMiddleware := func(next http.Handler) http.Handler { return next }
+	srv := NewServer(pRunner, outputStore, noopMiddleware, tokenAuth, false)
+
+	claims := make(map[string]interface{})
+	jwtauth.SetIssuedNow(claims)
+	_, tokenString, _ := tokenAuth.Encode(claims)
+
+	req := httptest.NewRequest(http.MethodPost, "/pipelines/schedule", strings.NewReader(`{
+		"pipeline": "release_it"
+	}`))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var result struct{ JobID string }
+	err = json.NewDecoder(rec.Body).Decode(&result)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.JobID)
+	jobID := uuid.Must(uuid.FromString(result.JobID))
+
+	err = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {})
+	require.NoError(t, err)
+
+	// Wait until job is completed (busy waiting style)
+	test.WaitForCondition(t, func() bool {
+		var completed bool
+		_ = pRunner.ReadJob(jobID, func(j *prunner.PipelineJob) {
+			completed = j.Completed
+		})
+		return completed
+	}, 50*time.Millisecond, "job exists and is completed")
+
+	// Get logs
+	req = httptest.NewRequest(http.MethodGet, "/job/logs?id="+jobID.String()+"&task=lint", nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenString))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var logs struct {
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+	}
+	err = json.NewDecoder(rec.Body).Decode(&logs)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, logs.Stdout)
+	assert.NotEmpty(t, logs.Stderr)
 }

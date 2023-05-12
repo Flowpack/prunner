@@ -733,15 +733,15 @@ func (r *PipelineRunner) SaveToStore() {
 						WithField("pipeline", job.Pipeline).
 						WithField("removalReason", removalReason).
 						WithError(err).
-						Errorf("Removing job - Error removing Logs from Output Store for Job")
-				} else {
-					log.
-						WithField("component", "runner").
-						WithField("jobID", job.ID.String()).
-						WithField("pipeline", job.Pipeline).
-						WithField("removalReason", removalReason).
-						Infof("Removing job")
+						Errorf("Failed to remove logs from output store for job")
 				}
+
+				log.
+					WithField("component", "runner").
+					WithField("jobID", job.ID.String()).
+					WithField("pipeline", job.Pipeline).
+					WithField("removalReason", removalReason).
+					Infof("Removing job")
 			}
 		}
 	}
