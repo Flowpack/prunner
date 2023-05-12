@@ -407,9 +407,9 @@ Prunner can be started inside a container. There are a few things to consider:
 ### Running locally
 
 ```bash
-go run ./cmd/prunner
+go run ./cmd/prunner --path examples
 ```
-> Note: for development a live reload wrapper like https://github.com/markbates/refresh is recommended.
+> Note: for development a live reload wrapper like https://github.com/networkteam/refresh is recommended.
 
 The API should now be accessible at http://localhost:9009/. The log will contain an example JWT auth token that can be used for authentication in local development.
 

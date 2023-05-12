@@ -10,7 +10,7 @@ import (
 )
 
 // StructuredLogFormatter is a middleware.LogFormatter with structured fields for production use
-func StructuredLogFormatter(logger log.Interface) *structuredLogger {
+func StructuredLogFormatter(logger log.Interface) middleware.LogFormatter {
 	return &structuredLogger{logger: logger.WithField("component", "api")}
 }
 
@@ -51,7 +51,7 @@ func (l *structuredLogger) NewLogEntry(r *http.Request) middleware.LogEntry {
 	logFields["userAgent"] = r.UserAgent()
 
 	logFields["httpHost"] = r.Host
-	logFields["httpPath"] = r.RequestURI
+	logFields["httpPath"] = r.URL.RequestURI()
 
 	entry.Logger = entry.Logger.WithFields(logFields)
 
