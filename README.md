@@ -1,10 +1,6 @@
 <img src="docs/prunner-logo-light.png" alt="prunner" width="320" align="center">
 
 ---
-[![GoDoc](https://godoc.org/github.com/Flowpack/prunner?status.svg)](https://godoc.org/github.com/Flowpack/prunner)
-[![Build Status](https://github.com/Flowpack/prunner/actions/workflows/test.yml/badge.svg)](https://github.com/Flowpack/prunner/actions/workflows/test.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Flowpack/prunner)](https://goreportcard.com/report/github.com/Flowpack/prunner)
-[![codecov](https://codecov.io/gh/Flowpack/prunner/branch/main/graph/badge.svg?token=RTYBJ3ACPT)](https://codecov.io/gh/Flowpack/prunner)
 
 **Prunner is an embeddable task / pipeline runner with an HTTP API.**
 
@@ -62,8 +58,8 @@ This is NOT a fully featured CI pipeline solution.
 
 [![Release](https://img.shields.io/github/release/Flowpack/prunner.svg?style=for-the-badge)](https://github.com/Flowpack/prunner/releases/latest)
 [![Software License](https://img.shields.io/badge/license-GPLv3-brightgreen.svg?style=for-the-badge)](/LICENSE)
-[![Build status](https://img.shields.io/github/workflow/status/Flowpack/prunner/run%20tests?style=for-the-badge)](https://github.com/Flowpack/prunner/actions?workflow=run%20tests)
-[![Coverage](https://img.shields.io/coveralls/github/Flowpack/prunner.svg?style=for-the-badge)](https://coveralls.io/github/Flowpack/prunner)
+[![Build status](https://img.shields.io/github/actions/workflow/status/Flowpack/prunner/test.yml?style=for-the-badge)](https://github.com/Flowpack/prunner/actions?workflow=run%20tests)
+[![Coverage](https://img.shields.io/codecov/c/github/Flowpack/prunner?style=for-the-badge&token=RTYBJ3ACPT)](https://codecov.io/gh/Flowpack/prunner)
 
 ## Components
 
