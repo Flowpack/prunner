@@ -297,8 +297,8 @@ func TestPipelineRunner_CancelJob_WithQueuedJob(t *testing.T) {
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
-				jobID := t.Variables.Get(taskctl.JobIDVariableName)
 				mx.Lock()
+				jobID := t.Variables.Get(taskctl.JobIDVariableName)
 				startedJobsIDs = append(startedJobsIDs, jobID.(string))
 				mx.Unlock()
 
@@ -934,7 +934,7 @@ func TestPipelineRunner_Shutdown_WithRunningJob_Forced(t *testing.T) {
 				QueueLimit:  nil,
 				Tasks: map[string]definition.TaskDef{
 					"sleep": {
-						Script: []string{"sleep 1"},
+						Script: []string{"sleep 10"},
 					},
 				},
 				SourcePath: "fixtures",

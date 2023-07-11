@@ -365,6 +365,10 @@ func (r *PipelineRunner) ReadJob(id uuid.UUID, process func(j *PipelineJob)) err
 func (r *PipelineRunner) startJob(job *PipelineJob) {
 	defer r.requestPersist()
 
+	if job.Canceled {
+		return
+	}
+
 	r.initScheduler(job)
 
 	graph, err := buildPipelineGraph(job.ID, job.Tasks, job.Variables)
