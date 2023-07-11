@@ -363,11 +363,12 @@ func (r *PipelineRunner) ReadJob(id uuid.UUID, process func(j *PipelineJob)) err
 }
 
 func (r *PipelineRunner) startJob(job *PipelineJob) {
-	defer r.requestPersist()
-
+	// If the job was queued and marked as canceled, we don't start it
 	if job.Canceled {
 		return
 	}
+
+	defer r.requestPersist()
 
 	r.initScheduler(job)
 
@@ -954,6 +955,8 @@ func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
 			Debugf("Marked job as canceled, since it was not started")
+
+		r.requestPersist()
 
 		return nil
 	}
