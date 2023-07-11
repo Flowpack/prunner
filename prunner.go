@@ -192,7 +192,6 @@ var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipe
 var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
 var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
-var errJobNotStarted = errors.New("job is not started")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
 func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
