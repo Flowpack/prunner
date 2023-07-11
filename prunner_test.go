@@ -290,16 +290,17 @@ func TestPipelineRunner_CancelJob_WithQueuedJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var (
-		startedJobsIDs []string
-		wait           = make(chan struct{})
-	)
+	var mx sync.Mutex
+	var startedJobsIDs []string
+	var wait = make(chan struct{})
 
 	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
 		return &test.MockRunner{
 			OnRun: func(t *task.Task) error {
 				jobID := t.Variables.Get(taskctl.JobIDVariableName)
+				mx.Lock()
 				startedJobsIDs = append(startedJobsIDs, jobID.(string))
+				mx.Unlock()
 
 				// Wait until the job should proceed (wait channel is closed)
 				<-wait
@@ -330,8 +331,9 @@ func TestPipelineRunner_CancelJob_WithQueuedJob(t *testing.T) {
 
 	assert.Equal(t, true, job2.Tasks.ByName("sleep").Canceled, "job task was marked as canceled")
 
+	mx.Lock()
+	defer mx.Unlock()
 	assert.Equal(t, []string{job1.ID.String()}, startedJobsIDs, "only job1 was started")
-
 }
 
 func TestPipelineRunner_CancelJob_WithStoppedJob_ShouldNotThrowFatalError(t *testing.T) {
