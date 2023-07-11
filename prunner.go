@@ -153,6 +153,13 @@ func (j *PipelineJob) deinitScheduler() {
 	j.taskRunner = nil
 }
 
+func (j *PipelineJob) markAsCanceled() {
+	j.Canceled = true
+	for i := range j.Tasks {
+		j.Tasks[i].Canceled = true
+	}
+}
+
 // jobTask is a single task invocation inside the PipelineJob
 type jobTask struct {
 	definition.TaskDef
@@ -185,7 +192,6 @@ var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipe
 var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
 var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
-var errJobNotStarted = errors.New("job is not started")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
 func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
@@ -357,6 +363,11 @@ func (r *PipelineRunner) ReadJob(id uuid.UUID, process func(j *PipelineJob)) err
 }
 
 func (r *PipelineRunner) startJob(job *PipelineJob) {
+	// If the job was queued and marked as canceled, we don't start it
+	if job.Canceled {
+		return
+	}
+
 	defer r.requestPersist()
 
 	r.initScheduler(job)
@@ -937,7 +948,17 @@ func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 	}
 
 	if job.Start == nil {
-		return errJobNotStarted
+		job.markAsCanceled()
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			Debugf("Marked job as canceled, since it was not started")
+
+		r.requestPersist()
+
+		return nil
 	}
 
 	log.
