@@ -153,6 +153,13 @@ func (j *PipelineJob) deinitScheduler() {
 	j.taskRunner = nil
 }
 
+func (j *PipelineJob) markAsCanceled() {
+	j.Canceled = true
+	for i := range j.Tasks {
+		j.Tasks[i].Canceled = true
+	}
+}
+
 // jobTask is a single task invocation inside the PipelineJob
 type jobTask struct {
 	definition.TaskDef
@@ -937,7 +944,15 @@ func (r *PipelineRunner) cancelJobInternal(id uuid.UUID) error {
 	}
 
 	if job.Start == nil {
-		return errJobNotStarted
+		job.markAsCanceled()
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			Debugf("Marked job as canceled, since it was not started")
+
+		return nil
 	}
 
 	log.
