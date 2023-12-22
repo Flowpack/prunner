@@ -161,6 +161,7 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	require.NoError(t, err)
 
 	waitForCompletedJob(t, pRunner, job.ID)
+	assert.NoError(t, job.LastError)
 }
 
 func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
@@ -213,6 +214,7 @@ func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	waitForCompletedJob(t, pRunner, job.ID)
+	assert.NoError(t, job.LastError)
 
 	pipelineVarTaskOutput := store.GetBytes(job.ID.String(), "pipeline_var", "stdout")
 	assert.Equal(t, "from pipeline,from pipeline,from process", string(pipelineVarTaskOutput), "output of pipeline_var")
@@ -325,6 +327,7 @@ func TestPipelineRunner_CancelJob_WithQueuedJob(t *testing.T) {
 	waitForCompletedJob(t, pRunner, job1.ID)
 	waitForCanceledJob(t, pRunner, job2.ID)
 	waitForCompletedJob(t, pRunner, job3.ID)
+	assert.NoError(t, job1.LastError)
 
 	assert.Nil(t, job2.Start, "job 2 should not be started")
 	assert.Equal(t, true, job2.Tasks.ByName("sleep").Canceled, "job 2 task was marked as canceled")
@@ -426,6 +429,7 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 	jobID := job.ID
 
 	waitForCompletedJob(t, pRunner, jobID)
+	assert.Error(t, job.LastError)
 
 	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
 	assert.True(t, job.Tasks.ByName("ok").Canceled, "ok task should be cancelled")
