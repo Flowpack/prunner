@@ -40,6 +40,15 @@ func (d TaskDef) Equals(otherDef TaskDef) bool {
 	return true
 }
 
+// OnErrorTaskDef is a special task definition to be executed solely if an error occurs during "normal" task handling.
+type OnErrorTaskDef struct {
+	// Script is a list of shell commands that are executed if an error occurs in a "normal" task
+	Script []string `yaml:"script"`
+
+	// Env sets/overrides environment variables for this task (takes precedence over pipeline environment)
+	Env map[string]string `yaml:"env"`
+}
+
 type PipelineDef struct {
 	// Concurrency declares how many instances of this pipeline are allowed to execute concurrently (defaults to 1)
 	Concurrency int `yaml:"concurrency"`
@@ -61,6 +70,15 @@ type PipelineDef struct {
 	Env map[string]string `yaml:"env"`
 
 	Tasks map[string]TaskDef `yaml:"tasks"`
+
+	// Script to be executed if this pipeline fails, e.g. for notifications.
+	// In this script, you have the following variables set:
+	// - failedTaskName: Name of the failed task (key from pipelines.yml)
+	// - failedTaskExitCode: Exit code of the failed task
+	// - failedTaskError: Error message of the failed task
+	// - failedTaskStdout: Stdout of the failed task
+	// - failedTaskStderr: Stderr of the failed task
+	OnError OnErrorTaskDef `yaml:"onError"`
 
 	// SourcePath stores the source path where the pipeline was defined
 	SourcePath string
