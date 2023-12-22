@@ -487,17 +487,57 @@ func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorT
 		WithField("failedTaskName", t.Name).
 		Debug("Triggering onError Script because of task failure")
 
-	rc, _ := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
-	defer func(rc io.ReadCloser) {
-		_ = rc.Close()
-	}(rc)
-	failedTaskStdout, err := io.ReadAll(rc)
+	var failedTaskStdout []byte
+	rc, err := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", j.ID.String()).
+			WithField("pipeline", j.Pipeline).
+			WithField("failedTaskName", t.Name).
+			WithError(err).
+			Debug("Could not create stdoutReader for failed task")
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		failedTaskStdout, err = io.ReadAll(rc)
+		if err != nil {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", j.ID.String()).
+				WithField("pipeline", j.Pipeline).
+				WithField("failedTaskName", t.Name).
+				WithError(err).
+				Debug("Could not read stdout of failed task")
+		}
+	}
 
-	rc, _ = r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
-	defer func(rc io.ReadCloser) {
-		_ = rc.Close()
-	}(rc)
-	failedTaskStderr, err := io.ReadAll(rc)
+	var failedTaskStderr []byte
+	rc, err = r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", j.ID.String()).
+			WithField("pipeline", j.Pipeline).
+			WithField("failedTaskName", t.Name).
+			WithError(err).
+			Debug("Could not create stderrReader for failed task")
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		failedTaskStderr, err = io.ReadAll(rc)
+		if err != nil {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", j.ID.String()).
+				WithField("pipeline", j.Pipeline).
+				WithField("failedTaskName", t.Name).
+				WithError(err).
+				Debug("Could not read stderr of failed task")
+		}
+	}
 
 	onErrorVariables := make(map[string]interface{})
 	for key, value := range j.Variables {
