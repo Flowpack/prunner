@@ -161,6 +161,7 @@ func TestPipelineRunner_ScheduleAsync_WithEmptyScriptTask(t *testing.T) {
 	require.NoError(t, err)
 
 	waitForCompletedJob(t, pRunner, job.ID)
+	assert.NoError(t, job.LastError)
 }
 
 func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
@@ -213,6 +214,7 @@ func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	waitForCompletedJob(t, pRunner, job.ID)
+	assert.NoError(t, job.LastError)
 
 	pipelineVarTaskOutput := store.GetBytes(job.ID.String(), "pipeline_var", "stdout")
 	assert.Equal(t, "from pipeline,from pipeline,from process", string(pipelineVarTaskOutput), "output of pipeline_var")
@@ -221,6 +223,137 @@ func TestPipelineRunner_ScheduleAsync_WithEnvVars(t *testing.T) {
 	assert.Equal(t, "from task,from pipeline,from process", string(taskVarTaskOutput), "output of task_var")
 }
 
+func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"erroring_script": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"a": {
+						Script: []string{"echo A"},
+					},
+					"b": {
+						Script: []string{
+							"echo stdoutContent",
+							"echo This message goes to stderr >&2",
+							"exit 42",
+						},
+					},
+					"wait": {
+						DependsOn: []string{"a", "b"},
+					},
+				},
+				OnError: definition.OnErrorTaskDef{
+					Script: []string{
+						"echo ON_ERROR",
+						"echo 'Failed Task Name: {{ .failedTaskName }}'",
+						"echo 'Failed Task Exit Code: {{ .failedTaskExitCode }}'",
+						"echo 'Failed Task Error: {{ .failedTaskError }}'",
+						"echo 'Failed Task Stdout: {{ .failedTaskStdout }}'",
+						"echo 'Failed Task Stderr: {{ .failedTaskStderr }}'",
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockOutputStore := test.NewMockOutputStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(mockOutputStore)
+		return taskRunner
+	}, nil, mockOutputStore)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("erroring_script", ScheduleOpts{})
+	require.NoError(t, err)
+
+	waitForCompletedJob(t, pRunner, job.ID)
+	res := mockOutputStore.GetBytes(job.ID.String(), "on_error", "stdout")
+	assert.Error(t, job.LastError)
+	assert.Equal(t, `ON_ERROR
+Failed Task Name: b
+Failed Task Exit Code: 42
+Failed Task Error: exit status 42
+Failed Task Stdout: stdoutContent
+
+Failed Task Stderr: This message goes to stderr
+
+`, string(res))
+
+	jt := job.Tasks.ByName("on_error")
+	if assert.NotNil(t, jt) {
+		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.False(t, jt.Errored, "task was not marked as errored")
+		assert.Equal(t, "done", jt.Status, "task has status done")
+		assert.Nil(t, jt.Error, "task has no error set")
+	}
+}
+
+func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndSetsStateCorrectlyIfErrorHookFails(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"erroring_script": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"a": {
+						Script: []string{"echo A"},
+					},
+					"b": {
+						Script: []string{
+							"echo stdoutContent",
+							"echo This message goes to stderr >&2",
+							"exit 42",
+						},
+					},
+					"wait": {
+						DependsOn: []string{"a", "b"},
+					},
+				},
+				OnError: definition.OnErrorTaskDef{
+					Script: []string{
+						"echo ON_ERROR",
+						"exit 1",
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockOutputStore := test.NewMockOutputStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(mockOutputStore)
+		return taskRunner
+	}, nil, mockOutputStore)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("erroring_script", ScheduleOpts{})
+	require.NoError(t, err)
+
+	waitForCompletedJob(t, pRunner, job.ID)
+	assert.Error(t, job.LastError)
+
+	jt := job.Tasks.ByName("on_error")
+	if assert.NotNil(t, jt) {
+		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.True(t, jt.Errored, "task was not marked as errored")
+		assert.Equal(t, "error", jt.Status, "task has status done")
+		assert.NotNil(t, jt.Error, "task has no error set")
+	}
+}
 func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 	var defs = &definition.PipelinesDef{
 		Pipelines: map[string]definition.PipelineDef{
@@ -325,6 +458,7 @@ func TestPipelineRunner_CancelJob_WithQueuedJob(t *testing.T) {
 	waitForCompletedJob(t, pRunner, job1.ID)
 	waitForCanceledJob(t, pRunner, job2.ID)
 	waitForCompletedJob(t, pRunner, job3.ID)
+	assert.NoError(t, job1.LastError)
 
 	assert.Nil(t, job2.Start, "job 2 should not be started")
 	assert.Equal(t, true, job2.Tasks.ByName("sleep").Canceled, "job 2 task was marked as canceled")
@@ -426,6 +560,7 @@ func TestPipelineRunner_FirstErroredTaskShouldCancelAllRunningTasks_ByDefault(t 
 	jobID := job.ID
 
 	waitForCompletedJob(t, pRunner, jobID)
+	assert.Error(t, job.LastError)
 
 	assert.True(t, job.Tasks.ByName("err").Errored, "err task was errored")
 	assert.True(t, job.Tasks.ByName("ok").Canceled, "ok task should be cancelled")

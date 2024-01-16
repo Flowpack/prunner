@@ -3,6 +3,7 @@ package prunner
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -418,6 +419,39 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	if jt == nil {
 		return
 	}
+	updateJobTaskStateFromTask(jt, t)
+
+	// If the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is false),
+	// then we directly abort all other tasks of the job.
+	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
+	// if one task failed, and we want to kill the other tasks.
+	if jt.Errored {
+		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
+		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", jobIDString).
+				WithField("pipeline", j.Pipeline).
+				WithField("failedTaskName", t.Name).
+				Debug("Task failed - cancelling all other tasks of the job")
+			// Use internal cancel since we already have a lock on the mutex
+			_ = r.cancelJobInternal(jobID)
+		}
+
+		if found && len(pipelineDef.OnError.Script) > 0 {
+			// we errored; and there is an onError script defined for the
+			// current pipeline. So let's run it.
+			r.runOnErrorScript(t, j, pipelineDef.OnError)
+		}
+	}
+
+	r.requestPersist()
+}
+
+// updateJobTaskStateFromTask updates jobTask properties from a given taskCtl task.Task.
+// Very internal helper function, to be used in PipelineRunner.HandleTaskChange
+// and PipelineRunner.runOnErrorScript.
+func updateJobTaskStateFromTask(jt *jobTask, t *task.Task) {
 	if !t.Start.IsZero() {
 		start := t.Start
 		jt.Start = &start
@@ -437,25 +471,143 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 		jt.Error = t.Error
 	}
 
-	// if the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is set to FALSE),
-	// then we directly abort all other tasks of the job.
-	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
-	// if one task failed, and we want to kill the other tasks.
-	if jt.Errored {
-		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
-		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
+}
+
+const OnErrorTaskName = "on_error"
+
+// runOnErrorScript is responsible for running a special "on_error" script in response to an error in the pipeline.
+// It exposes variables containing information about the errored task.
+//
+// The method is triggered with the errored Task t, belonging to pipelineJob j; and pipelineDev
+func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorTaskDef definition.OnErrorTaskDef) {
+	log.
+		WithField("component", "runner").
+		WithField("jobID", j.ID.String()).
+		WithField("pipeline", j.Pipeline).
+		WithField("failedTaskName", t.Name).
+		Debug("Triggering onError Script because of task failure")
+
+	var failedTaskStdout []byte
+	rc, err := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", j.ID.String()).
+			WithField("pipeline", j.Pipeline).
+			WithField("failedTaskName", t.Name).
+			WithError(err).
+			Warn("Could not create stdout reader for failed task")
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		failedTaskStdout, err = io.ReadAll(rc)
+		if err != nil {
 			log.
 				WithField("component", "runner").
-				WithField("jobID", jobIDString).
+				WithField("jobID", j.ID.String()).
 				WithField("pipeline", j.Pipeline).
 				WithField("failedTaskName", t.Name).
-				Debug("Task failed - cancelling all other tasks of the job")
-			// Use internal cancel since we already have a lock on the mutex
-			_ = r.cancelJobInternal(jobID)
+				WithError(err).
+				Warn("Could not read stdout of failed task")
 		}
 	}
 
-	r.requestPersist()
+	var failedTaskStderr []byte
+	rc, err = r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", j.ID.String()).
+			WithField("pipeline", j.Pipeline).
+			WithField("failedTaskName", t.Name).
+			WithError(err).
+			Debug("Could not create stderrReader for failed task")
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		failedTaskStderr, err = io.ReadAll(rc)
+		if err != nil {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", j.ID.String()).
+				WithField("pipeline", j.Pipeline).
+				WithField("failedTaskName", t.Name).
+				WithError(err).
+				Debug("Could not read stderr of failed task")
+		}
+	}
+
+	onErrorVariables := make(map[string]interface{})
+	for key, value := range j.Variables {
+		onErrorVariables[key] = value
+	}
+	onErrorVariables["failedTaskName"] = t.Name
+	onErrorVariables["failedTaskExitCode"] = t.ExitCode
+	onErrorVariables["failedTaskError"] = t.Error
+	onErrorVariables["failedTaskStdout"] = string(failedTaskStdout)
+	onErrorVariables["failedTaskStderr"] = string(failedTaskStderr)
+
+	onErrorJobTask := jobTask{
+		TaskDef: definition.TaskDef{
+			Script: onErrorTaskDef.Script,
+			// AllowFailure needs to be false, otherwise lastError below won't be filled (so errors will not appear in the log)
+			AllowFailure: false,
+			Env:          onErrorTaskDef.Env,
+		},
+		Name:   OnErrorTaskName,
+		Status: toStatus(scheduler.StatusWaiting),
+	}
+
+	// store on task list; so that it appears in pipeline and UI etc
+	j.Tasks = append(j.Tasks, onErrorJobTask)
+
+	onErrorGraph, err := buildPipelineGraph(j.ID, jobTasks{onErrorJobTask}, onErrorVariables)
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", j.ID).
+			WithField("pipeline", j.Pipeline).
+			Error("Failed to build onError pipeline graph")
+		onErrorJobTask.Error = err
+		onErrorJobTask.Errored = true
+
+		// the last element in the task list is our onErrorJobTask; but because it is not a pointer we need to
+		// store it again after modifying it.
+		j.Tasks[len(j.Tasks)-1] = onErrorJobTask
+		return
+	}
+
+	// we use a detached taskRunner and scheduler to run the onError task, to
+	// run synchronously (as we are already in an async goroutine here), won't have any cycles,
+	// and to simplify the code.
+	taskRunner := r.createTaskRunner(j)
+	sched := taskctl.NewScheduler(taskRunner)
+
+	// Now, actually run the job synchronously
+	lastErr := sched.Schedule(onErrorGraph)
+
+	// Update job status as with normal jobs
+	onErrorJobTask.Status = toStatus(onErrorGraph.Nodes()[OnErrorTaskName].ReadStatus())
+	updateJobTaskStateFromTask(&onErrorJobTask, onErrorGraph.Nodes()[OnErrorTaskName].Task)
+
+	if lastErr != nil {
+		log.
+			WithError(err).
+			WithField("jobID", j.ID).
+			WithField("pipeline", j.Pipeline).
+			Error("Error running the onError handler")
+	} else {
+		log.
+			WithField("jobID", j.ID).
+			WithField("pipeline", j.Pipeline).
+			Debug("Successfully ran the onError handler")
+	}
+
+	// the last element in the task list is our onErrorJobTask; but because it is not a pointer we need to
+	// store it again after modifying it.
+	j.Tasks[len(j.Tasks)-1] = onErrorJobTask
 }
 
 // HandleStageChange will be called when the stage state changes in the scheduler
@@ -810,6 +962,7 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
 
+		// TODO This is not safe to do outside of the requestPersist loop, since we might have a save in progress. So we need to wait until the save loop is finished before calling SaveToStore.
 		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
 	}()
