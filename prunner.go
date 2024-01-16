@@ -421,7 +421,7 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	}
 	updateJobTaskStateFromTask(jt, t)
 
-	// if the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is set to FALSE),
+	// If the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is false),
 	// then we directly abort all other tasks of the job.
 	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
 	// if one task failed, and we want to kill the other tasks.
@@ -496,7 +496,7 @@ func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorT
 			WithField("pipeline", j.Pipeline).
 			WithField("failedTaskName", t.Name).
 			WithError(err).
-			Debug("Could not create stdoutReader for failed task")
+			Warn("Could not create stdout reader for failed task")
 	} else {
 		defer func(rc io.ReadCloser) {
 			_ = rc.Close()
@@ -509,7 +509,7 @@ func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorT
 				WithField("pipeline", j.Pipeline).
 				WithField("failedTaskName", t.Name).
 				WithError(err).
-				Debug("Could not read stdout of failed task")
+				Warn("Could not read stdout of failed task")
 		}
 	}
 
@@ -552,7 +552,7 @@ func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorT
 	onErrorJobTask := jobTask{
 		TaskDef: definition.TaskDef{
 			Script: onErrorTaskDef.Script,
-			// AllowFailure needs to be FALSE; otherwise lastError below won't be filled (so errors will not appear in the log)
+			// AllowFailure needs to be false, otherwise lastError below won't be filled (so errors will not appear in the log)
 			AllowFailure: false,
 			Env:          onErrorTaskDef.Env,
 		},
@@ -962,6 +962,7 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
 
+		// TODO This is not safe to do outside of the requestPersist loop, since we might have a save in progress. So we need to wait until the save loop is finished before calling SaveToStore.
 		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
 	}()

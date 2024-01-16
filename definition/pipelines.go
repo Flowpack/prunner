@@ -69,10 +69,12 @@ type PipelineDef struct {
 	// Env sets/overrides environment variables for all tasks (takes precedence over process environment)
 	Env map[string]string `yaml:"env"`
 
+	// Tasks is a map of task names to task definitions
 	Tasks map[string]TaskDef `yaml:"tasks"`
 
-	// Script to be executed if this pipeline fails, e.g. for notifications.
-	// In this script, you have the following variables set:
+	// Task to be executed if this pipeline fails, e.g. for notifications.
+	//
+	// In this task, you have the following variables set:
 	// - failedTaskName: Name of the failed task (key from pipelines.yml)
 	// - failedTaskExitCode: Exit code of the failed task
 	// - failedTaskError: Error message of the failed task
