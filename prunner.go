@@ -448,6 +448,8 @@ func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
 	}
 }
 
+const OnErrorTaskName = "on_error"
+
 func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
@@ -576,7 +578,24 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	if jt == nil {
 		return
 	}
-	updateJobTaskStateFromTask(jt, t)
+	if !t.Start.IsZero() {
+		start := t.Start
+		jt.Start = &start
+	}
+	if !t.End.IsZero() {
+		end := t.End
+		jt.End = &end
+	}
+	jt.ExitCode = t.ExitCode
+	jt.Skipped = t.Skipped
+
+	// Set canceled flag on the job if a task was canceled through the context
+	if errors.Is(t.Error, context.Canceled) {
+		jt.Canceled = true
+	} else {
+		jt.Errored = t.Errored
+		jt.Error = t.Error
+	}
 
 	// If the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is false),
 	// then we directly abort all other tasks of the job.
@@ -598,33 +617,6 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 
 	r.requestPersist()
 }
-
-// updateJobTaskStateFromTask updates jobTask properties from a given taskCtl task.Task.
-// Very internal helper function, to be used in PipelineRunner.HandleTaskChange
-// and PipelineRunner.runOnErrorScript.
-func updateJobTaskStateFromTask(jt *jobTask, t *task.Task) {
-	if !t.Start.IsZero() {
-		start := t.Start
-		jt.Start = &start
-	}
-	if !t.End.IsZero() {
-		end := t.End
-		jt.End = &end
-	}
-	jt.ExitCode = t.ExitCode
-	jt.Skipped = t.Skipped
-
-	// Set canceled flag on the job if a task was canceled through the context
-	if errors.Is(t.Error, context.Canceled) {
-		jt.Canceled = true
-	} else {
-		jt.Errored = t.Errored
-		jt.Error = t.Error
-	}
-
-}
-
-const OnErrorTaskName = "on_error"
 
 // HandleStageChange will be called when the stage state changes in the scheduler
 func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {
