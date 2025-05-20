@@ -245,7 +245,7 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook(t *t
 						DependsOn: []string{"a", "b"},
 					},
 				},
-				OnError: definition.OnErrorTaskDef{
+				OnError: &definition.OnErrorTaskDef{
 					Script: []string{
 						"echo ON_ERROR",
 						"echo 'Failed Task Name: {{ .failedTaskName }}'",
@@ -318,7 +318,7 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndS
 						DependsOn: []string{"a", "b"},
 					},
 				},
-				OnError: definition.OnErrorTaskDef{
+				OnError: &definition.OnErrorTaskDef{
 					Script: []string{
 						"echo ON_ERROR",
 						"exit 1",
@@ -354,6 +354,67 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndS
 		assert.NotNil(t, jt.Error, "task has no error set")
 	}
 }
+
+func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndSetsStateCorrectlyIfErrorHookUsesUnknownVariables(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"erroring_script": {
+				// Concurrency of 1 is the default for a single concurrent execution
+				Concurrency: 1,
+				QueueLimit:  nil,
+				Tasks: map[string]definition.TaskDef{
+					"a": {
+						Script: []string{"echo A"},
+					},
+					"b": {
+						Script: []string{
+							"echo stdoutContent",
+							"echo This message goes to stderr >&2",
+							"exit 42",
+						},
+					},
+					"wait": {
+						DependsOn: []string{"a", "b"},
+					},
+				},
+				OnError: &definition.OnErrorTaskDef{
+					Script: []string{
+						"echo ON_ERROR",
+						"echo {{ .does_not_exist_and_error }}",
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockOutputStore := test.NewMockOutputStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		// Use a real runner here to test the actual processing of a task.Task
+		taskRunner, _ := taskctl.NewTaskRunner(mockOutputStore)
+		return taskRunner
+	}, nil, mockOutputStore)
+	require.NoError(t, err)
+
+	job, err := pRunner.ScheduleAsync("erroring_script", ScheduleOpts{})
+	require.NoError(t, err)
+
+	waitForCompletedJob(t, pRunner, job.ID)
+	assert.Error(t, job.LastError)
+
+	jt := job.Tasks.ByName("on_error")
+	if assert.NotNil(t, jt) {
+		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.True(t, jt.Errored, "task was not marked as errored")
+		assert.Equal(t, "error", jt.Status, "task has status done")
+		assert.NotNil(t, jt.Error, "task has no error set")
+		assert.Equal(t, "template: interpolate:1:8: executing \"interpolate\" at <.does_not_exist_and_error>: map has no entry for key \"does_not_exist_and_error\"", jt.Error.Error(), "task has wrong error message")
+	}
+}
+
 func TestPipelineRunner_CancelJob_WithRunningJob(t *testing.T) {
 	var defs = &definition.PipelinesDef{
 		Pipelines: map[string]definition.PipelineDef{

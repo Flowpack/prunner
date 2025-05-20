@@ -42,7 +42,7 @@ type PipelineRunner struct {
 	// externally, call requestPersist()
 	persistRequests chan struct{}
 
-	// Mutex for reading or writing jobs and job state
+	// Mutex for reading or writing pipeline definitions (defs), jobs and job state
 	mx               sync.RWMutex
 	createTaskRunner func(j *PipelineJob) taskctl.Runner
 
@@ -104,7 +104,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 // It can be scheduled (in the waitListByPipeline of PipelineRunner),
 // or currently running (jobsByID / jobsByPipeline in PipelineRunner).
 type PipelineJob struct {
-	ID         uuid.UUID
+	ID uuid.UUID
+	// Identifier of the pipeline (from the YAML file)
 	Pipeline   string
 	Env        map[string]string
 	Variables  map[string]interface{}
@@ -195,6 +196,10 @@ var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
+// ScheduleAsync schedules a pipeline execution, if pipeline concurrency config allows for it.
+// "pipeline" is the pipeline ID from the YAML file.
+//
+// the returned PipelineJob is the individual execution context.
 func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
@@ -399,11 +404,163 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 	go func() {
 		defer r.wg.Done()
 		lastErr := job.sched.Schedule(graph)
+		if lastErr != nil {
+			r.RunJobErrorHandler(job)
+		}
 		r.JobCompleted(job.ID, lastErr)
 	}()
 }
+func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
+	errorGraph, err := r.buildErrorGraph(job)
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Error("Failed to build error pipeline graph")
+		// At this point, an error with the error handling happened - duh...
+		// Nothing we can do at this point.
+		return
+	}
 
-// HandleTaskChange will be called when the task state changes in the task runner
+	// if errorGraph is nil (and no error); no error handling configured for task.
+	if errorGraph != nil {
+		// re-init scheduler, as we need a new one to schedule the error on. (the old one is already shut down
+		// if ContinueRunningTasksAfterFailure == false)
+		r.mx.Lock()
+		r.initScheduler(job)
+		r.mx.Unlock()
+
+		err = job.sched.Schedule(errorGraph)
+
+		if err != nil {
+			log.
+				WithError(err).
+				WithField("jobID", job.ID).
+				WithField("pipeline", job.Pipeline).
+				Error("Failed to run error handling for job")
+		} else {
+			log.
+				WithField("jobID", job.ID).
+				WithField("pipeline", job.Pipeline).
+				Info("error handling completed")
+		}
+	}
+}
+
+func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
+	r.mx.RLock()
+	defer r.mx.RUnlock()
+	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
+	if !pipelineDefExists {
+		return nil, fmt.Errorf("pipeline definition not found for pipeline %s (should never happen)", job.Pipeline)
+	}
+	onErrorTaskDef := pipelineDef.OnError
+	if onErrorTaskDef == nil {
+		// no error, but no error handling configured
+		return nil, nil
+	}
+
+	// we assume the 1st failed task (by end date) is the root cause, because this triggered a cascading abort then.
+	failedTask := findFirstFailedTaskByEndDate(job.Tasks)
+
+	failedTaskStdout := r.readTaskOutputBestEffort(job, failedTask, "stdout")
+	failedTaskStderr := r.readTaskOutputBestEffort(job, failedTask, "stderr")
+
+	onErrorVariables := make(map[string]interface{})
+	for key, value := range job.Variables {
+		onErrorVariables[key] = value
+	}
+	// TODO: find first failed task (by End Date)
+
+	if failedTask != nil {
+		onErrorVariables["failedTaskName"] = failedTask.Name
+		onErrorVariables["failedTaskExitCode"] = failedTask.ExitCode
+		onErrorVariables["failedTaskError"] = failedTask.Error
+		onErrorVariables["failedTaskStdout"] = string(failedTaskStdout)
+		onErrorVariables["failedTaskStderr"] = string(failedTaskStderr)
+	} else {
+		onErrorVariables["failedTaskName"] = "task_not_identified_should_not_happen"
+		onErrorVariables["failedTaskExitCode"] = "99"
+		onErrorVariables["failedTaskError"] = "task_not_identified_should_not_happen"
+		onErrorVariables["failedTaskStdout"] = "task_not_identified_should_not_happen"
+		onErrorVariables["failedTaskStderr"] = "task_not_identified_should_not_happen"
+	}
+
+	onErrorJobTask := jobTask{
+		TaskDef: definition.TaskDef{
+			Script: onErrorTaskDef.Script,
+			// AllowFailure needs to be false, otherwise lastError below won't be filled (so errors will not appear in the log)
+			AllowFailure: false,
+			Env:          onErrorTaskDef.Env,
+		},
+		Name:   OnErrorTaskName,
+		Status: toStatus(scheduler.StatusWaiting),
+	}
+	job.Tasks = append(job.Tasks, onErrorJobTask)
+
+	return buildPipelineGraph(job.ID, jobTasks{onErrorJobTask}, onErrorVariables)
+}
+
+func (r *PipelineRunner) readTaskOutputBestEffort(job *PipelineJob, task *jobTask, outputName string) []byte {
+	if task == nil || job == nil {
+		return []byte(nil)
+	}
+
+	rc, err := r.outputStore.Reader(job.ID.String(), task.Name, outputName)
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", job.ID.String()).
+			WithField("pipeline", job.Pipeline).
+			WithField("failedTaskName", task.Name).
+			WithField("outputName", outputName).
+			WithError(err).
+			Debug("Could not create stderrReader for failed task")
+		return []byte(nil)
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		outputAsBytes, err := io.ReadAll(rc)
+		if err != nil {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", job.ID.String()).
+				WithField("pipeline", job.Pipeline).
+				WithField("failedTaskName", task.Name).
+				WithField("outputName", outputName).
+				WithError(err).
+				Debug("Could not read output of task")
+		}
+
+		return outputAsBytes
+	}
+
+}
+
+// FindFirstFailedTaskByEndDate returns the first failed task ordered by End Date
+// A task is considered failed if it has errored or has a non-zero exit code
+func findFirstFailedTaskByEndDate(tasks jobTasks) *jobTask {
+	var firstFailedTask *jobTask
+
+	for i := range tasks {
+		task := &tasks[i]
+
+		// Check if the task failed (has an error or non-zero exit code)
+		if task.Errored {
+			// If this is our first failed task or this one ended earlier than our current earliest
+			if firstFailedTask == nil || task.End.Before(*firstFailedTask.End) {
+				firstFailedTask = task
+			}
+		}
+	}
+
+	return firstFailedTask
+}
+
+// HandleTaskChange will be called when the task state changes in the task runner (taskctl)
+// it is short-lived and updates our JobTask state accordingly.
 func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
@@ -437,12 +594,6 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 			// Use internal cancel since we already have a lock on the mutex
 			_ = r.cancelJobInternal(jobID)
 		}
-
-		if found && len(pipelineDef.OnError.Script) > 0 {
-			// we errored; and there is an onError script defined for the
-			// current pipeline. So let's run it.
-			r.runOnErrorScript(t, j, pipelineDef.OnError)
-		}
 	}
 
 	r.requestPersist()
@@ -474,141 +625,6 @@ func updateJobTaskStateFromTask(jt *jobTask, t *task.Task) {
 }
 
 const OnErrorTaskName = "on_error"
-
-// runOnErrorScript is responsible for running a special "on_error" script in response to an error in the pipeline.
-// It exposes variables containing information about the errored task.
-//
-// The method is triggered with the errored Task t, belonging to pipelineJob j; and pipelineDev
-func (r *PipelineRunner) runOnErrorScript(t *task.Task, j *PipelineJob, onErrorTaskDef definition.OnErrorTaskDef) {
-	log.
-		WithField("component", "runner").
-		WithField("jobID", j.ID.String()).
-		WithField("pipeline", j.Pipeline).
-		WithField("failedTaskName", t.Name).
-		Debug("Triggering onError Script because of task failure")
-
-	var failedTaskStdout []byte
-	rc, err := r.outputStore.Reader(j.ID.String(), t.Name, "stdout")
-	if err != nil {
-		log.
-			WithField("component", "runner").
-			WithField("jobID", j.ID.String()).
-			WithField("pipeline", j.Pipeline).
-			WithField("failedTaskName", t.Name).
-			WithError(err).
-			Warn("Could not create stdout reader for failed task")
-	} else {
-		defer func(rc io.ReadCloser) {
-			_ = rc.Close()
-		}(rc)
-		failedTaskStdout, err = io.ReadAll(rc)
-		if err != nil {
-			log.
-				WithField("component", "runner").
-				WithField("jobID", j.ID.String()).
-				WithField("pipeline", j.Pipeline).
-				WithField("failedTaskName", t.Name).
-				WithError(err).
-				Warn("Could not read stdout of failed task")
-		}
-	}
-
-	var failedTaskStderr []byte
-	rc, err = r.outputStore.Reader(j.ID.String(), t.Name, "stderr")
-	if err != nil {
-		log.
-			WithField("component", "runner").
-			WithField("jobID", j.ID.String()).
-			WithField("pipeline", j.Pipeline).
-			WithField("failedTaskName", t.Name).
-			WithError(err).
-			Debug("Could not create stderrReader for failed task")
-	} else {
-		defer func(rc io.ReadCloser) {
-			_ = rc.Close()
-		}(rc)
-		failedTaskStderr, err = io.ReadAll(rc)
-		if err != nil {
-			log.
-				WithField("component", "runner").
-				WithField("jobID", j.ID.String()).
-				WithField("pipeline", j.Pipeline).
-				WithField("failedTaskName", t.Name).
-				WithError(err).
-				Debug("Could not read stderr of failed task")
-		}
-	}
-
-	onErrorVariables := make(map[string]interface{})
-	for key, value := range j.Variables {
-		onErrorVariables[key] = value
-	}
-	onErrorVariables["failedTaskName"] = t.Name
-	onErrorVariables["failedTaskExitCode"] = t.ExitCode
-	onErrorVariables["failedTaskError"] = t.Error
-	onErrorVariables["failedTaskStdout"] = string(failedTaskStdout)
-	onErrorVariables["failedTaskStderr"] = string(failedTaskStderr)
-
-	onErrorJobTask := jobTask{
-		TaskDef: definition.TaskDef{
-			Script: onErrorTaskDef.Script,
-			// AllowFailure needs to be false, otherwise lastError below won't be filled (so errors will not appear in the log)
-			AllowFailure: false,
-			Env:          onErrorTaskDef.Env,
-		},
-		Name:   OnErrorTaskName,
-		Status: toStatus(scheduler.StatusWaiting),
-	}
-
-	// store on task list; so that it appears in pipeline and UI etc
-	j.Tasks = append(j.Tasks, onErrorJobTask)
-
-	onErrorGraph, err := buildPipelineGraph(j.ID, jobTasks{onErrorJobTask}, onErrorVariables)
-	if err != nil {
-		log.
-			WithError(err).
-			WithField("jobID", j.ID).
-			WithField("pipeline", j.Pipeline).
-			Error("Failed to build onError pipeline graph")
-		onErrorJobTask.Error = err
-		onErrorJobTask.Errored = true
-
-		// the last element in the task list is our onErrorJobTask; but because it is not a pointer we need to
-		// store it again after modifying it.
-		j.Tasks[len(j.Tasks)-1] = onErrorJobTask
-		return
-	}
-
-	// we use a detached taskRunner and scheduler to run the onError task, to
-	// run synchronously (as we are already in an async goroutine here), won't have any cycles,
-	// and to simplify the code.
-	taskRunner := r.createTaskRunner(j)
-	sched := taskctl.NewScheduler(taskRunner)
-
-	// Now, actually run the job synchronously
-	lastErr := sched.Schedule(onErrorGraph)
-
-	// Update job status as with normal jobs
-	onErrorJobTask.Status = toStatus(onErrorGraph.Nodes()[OnErrorTaskName].ReadStatus())
-	updateJobTaskStateFromTask(&onErrorJobTask, onErrorGraph.Nodes()[OnErrorTaskName].Task)
-
-	if lastErr != nil {
-		log.
-			WithError(err).
-			WithField("jobID", j.ID).
-			WithField("pipeline", j.Pipeline).
-			Error("Error running the onError handler")
-	} else {
-		log.
-			WithField("jobID", j.ID).
-			WithField("pipeline", j.Pipeline).
-			Debug("Successfully ran the onError handler")
-	}
-
-	// the last element in the task list is our onErrorJobTask; but because it is not a pointer we need to
-	// store it again after modifying it.
-	j.Tasks[len(j.Tasks)-1] = onErrorJobTask
-}
 
 // HandleStageChange will be called when the stage state changes in the scheduler
 func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {

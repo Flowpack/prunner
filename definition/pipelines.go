@@ -80,7 +80,7 @@ type PipelineDef struct {
 	// - failedTaskError: Error message of the failed task
 	// - failedTaskStdout: Stdout of the failed task
 	// - failedTaskStderr: Stderr of the failed task
-	OnError OnErrorTaskDef `yaml:"onError"`
+	OnError *OnErrorTaskDef `yaml:"onError"`
 
 	// SourcePath stores the source path where the pipeline was defined
 	SourcePath string
