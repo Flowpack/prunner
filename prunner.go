@@ -552,7 +552,11 @@ func findFirstFailedTaskByEndDate(tasks jobTasks) *jobTask {
 		// Check if the task failed (has an error or non-zero exit code)
 		if task.Errored {
 			// If this is our first failed task or this one ended earlier than our current earliest
-			if firstFailedTask == nil || task.End.Before(*firstFailedTask.End) {
+			if firstFailedTask == nil {
+				// we did not see any failed task yet. remember this one as the 1st failed task.
+				firstFailedTask = task
+			} else if firstFailedTask.End != nil && task.End != nil && task.End.Before(*firstFailedTask.End) {
+				// this task has failed EARLIER than the one we already remembered.
 				firstFailedTask = task
 			}
 		}
@@ -602,6 +606,11 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
 	// if one task failed, and we want to kill the other tasks.
 	if jt.Errored {
+		if jt.End == nil {
+			// Remember ending time in case of error (we need this to identify the correct onError hook)
+			now := time.Now()
+			jt.End = &now
+		}
 		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
 		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
 			log.

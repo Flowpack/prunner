@@ -234,15 +234,20 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook(t *t
 					"a": {
 						Script: []string{"echo A"},
 					},
+					"c": {
+						Script:    []string{"sleep 10; exit 42"},
+						DependsOn: []string{"b"},
+					},
 					"b": {
 						Script: []string{
 							"echo stdoutContent",
 							"echo This message goes to stderr >&2",
 							"exit 42",
 						},
+						DependsOn: []string{"a"},
 					},
 					"wait": {
-						DependsOn: []string{"a", "b"},
+						DependsOn: []string{"a", "b", "c"},
 					},
 				},
 				OnError: &definition.OnErrorTaskDef{
