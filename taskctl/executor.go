@@ -61,7 +61,7 @@ func NewPgidExecutor(stdin io.Reader, stdout, stderr io.Writer, killTimeout time
 		// the stdout/stderr files.
 		interp.StdIO(stdin, stdout, stderr),
 		// we use a custom ExecHandler for overriding the process group handling
-		interp.ExecHandler(createExecHandler(killTimeout)),
+		interp.ExecHandler(createExecHandler(killTimeout)), //nolint:staticcheck
 
 		// END MODIFICATION
 	)

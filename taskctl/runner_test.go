@@ -2,7 +2,7 @@ package taskctl
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"testing"
 	"time"
 
@@ -28,7 +28,7 @@ func TestTaskRunner(t *testing.T) {
 		t.Error()
 	}
 
-	runnr.Stdout, runnr.Stderr = ioutil.Discard, ioutil.Discard
+	runnr.Stdout, runnr.Stderr = io.Discard, io.Discard
 	runnr.SetVariables(variables.FromMap(map[string]string{"Root": "/tmp"}))
 	runnr.WithVariable("Root", "/")
 

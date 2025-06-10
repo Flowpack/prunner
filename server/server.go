@@ -3,7 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -49,7 +49,7 @@ func NewServer(pRunner *prunner.PipelineRunner, outputStore taskctl.OutputStore,
 		// Seek, verify and validate JWT tokens
 		r.Use(jwtauth.Verifier(tokenAuth))
 		// Handle valid / invalid tokens
-		r.Use(jwtauth.Authenticator)
+		r.Use(jwtauth.Authenticator(tokenAuth))
 
 		r.Route("/pipelines", func(r chi.Router) {
 			r.Get("/", srv.pipelines)
@@ -107,20 +107,20 @@ type pipelinesScheduleResponse struct {
 
 // swagger:route POST /pipelines/schedule pipelinesSchedule
 //
-// Schedule a pipeline execution
+// # Schedule a pipeline execution
 //
 // This will create a job for execution of the specified pipeline and variables.
 // If the pipeline is not schedulable (running and no queue / limit or concurrency exceeded) it will error.
 //
-//     Consumes:
-//     - application/json
+//	Consumes:
+//	- application/json
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default: pipelinesScheduleResponse
-//       400: genericErrorResponse
+//	Responses:
+//	  default: pipelinesScheduleResponse
+//	  400: genericErrorResponse
 func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 	_, claims, _ := jwtauth.FromContext(r.Context())
 	var user string
@@ -271,15 +271,15 @@ func jobToResult(j *prunner.PipelineJob) pipelineJobResult {
 
 // swagger:route GET /pipelines/jobs pipelinesJobs
 //
-// Get pipelines and jobs
+// # Get pipelines and jobs
 //
 // This is a combined operation to fetch pipelines and jobs in one request.
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default: pipelinesJobsResponse
+//	Responses:
+//	  default: pipelinesJobsResponse
 func (s *server) pipelinesJobs(w http.ResponseWriter, r *http.Request) {
 	pipelinesRes := s.listPipelines()
 	jobsRes := s.listPipelineJobs()
@@ -317,16 +317,16 @@ type pipelineResult struct {
 
 // swagger:route GET /pipelines/ pipelines
 //
-// List pipelines
+// # List pipelines
 //
 // This will show all defined pipelines with included information about running state or if it is possible to schedule
 // a job for this pipeline.
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default: pipelinesResponse
+//	Responses:
+//	  default: pipelinesResponse
 func (s *server) pipelines(w http.ResponseWriter, r *http.Request) {
 	res := s.listPipelines()
 
@@ -368,18 +368,18 @@ type jobLogsResponse struct {
 
 // swagger:route GET /job/logs jobLogs
 //
-// Get job logs
+// # Get job logs
 //
 // Task output for the given job and task will be fetched and returned for STDOUT / STDERR.
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default: jobLogsResponse
-//       400: genericErrorResponse
-//       404:
-//       500:
+//	Responses:
+//	  default: jobLogsResponse
+//	  400: genericErrorResponse
+//	  404:
+//	  500:
 func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 	var params jobLogsParams
 
@@ -432,8 +432,8 @@ func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 			WithError(err).
 			Errorf("failed to read output store")
 	} else {
-		stdout, _ = ioutil.ReadAll(stdoutReader)
-		stdoutReader.Close()
+		stdout, _ = io.ReadAll(stdoutReader)
+		_ = stdoutReader.Close() //nolint:errcheck
 	}
 
 	stderrReader, err := s.outputStore.Reader(jobID.String(), params.Task, "stderr")
@@ -442,8 +442,8 @@ func (s *server) jobLogs(w http.ResponseWriter, r *http.Request) {
 			WithError(err).
 			Errorf("failed to read output store")
 	} else {
-		stderr, _ = ioutil.ReadAll(stderrReader)
-		stderrReader.Close()
+		stderr, _ = io.ReadAll(stderrReader)
+		_ = stderrReader.Close() //nolint:errcheck
 	}
 
 	var resp jobLogsResponse
@@ -473,17 +473,17 @@ type jobDetailResponse struct {
 
 // swagger:route GET /job/detail jobDetail
 //
-// Get job details
+// # Get job details
 //
 // Get details about a single job.
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default: jobDetailResponse
-//       400: genericErrorResponse
-//       404:
+//	Responses:
+//	  default: jobDetailResponse
+//	  400: genericErrorResponse
+//	  404:
 func (s *server) jobDetail(w http.ResponseWriter, r *http.Request) {
 	var params jobDetailParams
 
@@ -535,17 +535,17 @@ type jobCancelParams struct {
 
 // swagger:route POST /job/cancel jobCancel
 //
-// Cancel a running job
+// # Cancel a running job
 //
 // Cancels the job and all tasks, but does not wait until all tasks are canceled.
 //
-//     Produces:
-//     - application/json
+//	Produces:
+//	- application/json
 //
-//     Responses:
-//       default:
-//       400: genericErrorResponse
-//       404:
+//	Responses:
+//	  default:
+//	  400: genericErrorResponse
+//	  404:
 func (s *server) jobCancel(w http.ResponseWriter, r *http.Request) {
 	var params jobCancelParams
 
