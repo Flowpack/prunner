@@ -492,12 +492,6 @@ func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.Execution
 		onErrorVariables["failedTaskError"] = failedTask.Error
 		onErrorVariables["failedTaskStdout"] = string(failedTaskStdout)
 		onErrorVariables["failedTaskStderr"] = string(failedTaskStderr)
-	} else {
-		onErrorVariables["failedTaskName"] = "task_not_identified_should_not_happen"
-		onErrorVariables["failedTaskExitCode"] = "99"
-		onErrorVariables["failedTaskError"] = "task_not_identified_should_not_happen"
-		onErrorVariables["failedTaskStdout"] = "task_not_identified_should_not_happen"
-		onErrorVariables["failedTaskStderr"] = "task_not_identified_should_not_happen"
 	}
 
 	onErrorJobTask := jobTask{
