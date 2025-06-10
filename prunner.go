@@ -412,17 +412,19 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 
 	// Run graph asynchronously
 	r.wg.Add(1)
-	go func() {
+	go func(sched *taskctl.Scheduler) {
 		defer r.wg.Done()
-		lastErr := job.sched.Schedule(graph)
+		lastErr := sched.Schedule(graph)
 		if lastErr != nil {
 			r.RunJobErrorHandler(job)
 		}
-		r.JobCompleted(job.ID, lastErr)
-	}()
+		r.JobCompleted(job, lastErr)
+	}(job.sched)
 }
 func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
-	errorGraph, err := r.BuildErrorGraph(job)
+	r.mx.Lock()
+	errorGraph, err := r.buildErrorGraph(job)
+	r.mx.Unlock()
 	if err != nil {
 		log.
 			WithError(err).
@@ -435,36 +437,35 @@ func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
 	}
 
 	// if errorGraph is nil (and no error); no error handling configured for task.
-	if errorGraph != nil {
-		// re-init scheduler, as we need a new one to schedule the error on. (the old one is already shut down
-		// if ContinueRunningTasksAfterFailure == false)
-		r.mx.Lock()
-		r.initScheduler(job)
-		r.mx.Unlock()
+	if errorGraph == nil {
+		return
+	}
 
-		err = job.sched.Schedule(errorGraph)
+	// re-init scheduler, as we need a new one to schedule the error on. (the old one is already shut down
+	// if ContinueRunningTasksAfterFailure == false)
+	r.mx.Lock()
+	r.initScheduler(job)
+	r.mx.Unlock()
 
-		if err != nil {
-			log.
-				WithError(err).
-				WithField("jobID", job.ID).
-				WithField("pipeline", job.Pipeline).
-				Error("Failed to run error handling for job")
-		} else {
-			log.
-				WithField("jobID", job.ID).
-				WithField("pipeline", job.Pipeline).
-				Info("error handling completed")
-		}
+	err = job.sched.Schedule(errorGraph)
+
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Error("Failed to run error handling for job")
+	} else {
+		log.
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Info("error handling completed")
 	}
 }
 
 const OnErrorTaskName = "on_error"
 
-func (r *PipelineRunner) BuildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
-	r.mx.RLock()
-	defer r.mx.RUnlock()
-
+func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
 	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
 	if !pipelineDefExists {
 		return nil, fmt.Errorf("pipeline definition not found for pipeline %s (should never happen)", job.Pipeline)
@@ -549,30 +550,6 @@ func (r *PipelineRunner) readTaskOutputBestEffort(job *PipelineJob, task *jobTas
 		return outputAsBytes
 	}
 
-}
-
-// FindFirstFailedTaskByEndDate returns the first failed task ordered by End Date
-// A task is considered failed if it has errored or has a non-zero exit code
-func findFirstFailedTaskByEndDate(tasks jobTasks) *jobTask {
-	var firstFailedTask *jobTask
-
-	for i := range tasks {
-		task := &tasks[i]
-
-		// Check if the task failed (has an error or non-zero exit code)
-		if task.Errored {
-			// If this is our first failed task or this one ended earlier than our current earliest
-			if firstFailedTask == nil {
-				// we did not see any failed task yet. remember this one as the 1st failed task.
-				firstFailedTask = task
-			} else if firstFailedTask.End != nil && task.End != nil && task.End.Before(*firstFailedTask.End) {
-				// this task has failed EARLIER than the one we already remembered.
-				firstFailedTask = task
-			}
-		}
-	}
-
-	return firstFailedTask
 }
 
 // HandleTaskChange will be called when the task state changes in the task runner (taskctl)
@@ -662,14 +639,9 @@ func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.requestPersist()
 }
 
-func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
+func (r *PipelineRunner) JobCompleted(job *PipelineJob, err error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
-
-	job := r.jobsByID[id]
-	if job == nil {
-		return
-	}
 
 	job.deinitScheduler()
 
@@ -686,7 +658,7 @@ func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	pipeline := job.Pipeline
 	log.
 		WithField("component", "runner").
-		WithField("jobID", id).
+		WithField("jobID", job.ID).
 		WithField("pipeline", pipeline).
 		Debug("Job completed")
 
@@ -888,9 +860,6 @@ func (r *PipelineRunner) initialLoadFromStore() error {
 }
 
 func (r *PipelineRunner) SaveToStore() {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	log.
 		WithField("component", "runner").
 		Debugf("Saving job state to data store")
@@ -985,11 +954,13 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		log.
 			WithField("component", "runner").
 			Debugf("Shutting down, waiting for pending operations...")
+
 		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
 
 		// Wait until the persist loop is done
 		<-r.persistLoopDone
+
 		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
 	}()
