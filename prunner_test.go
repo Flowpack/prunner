@@ -294,7 +294,7 @@ Failed Task Stderr: This message goes to stderr
 
 	jt := job.Tasks.ByName("on_error")
 	if assert.NotNil(t, jt) {
-		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.False(t, jt.Canceled, "on_error task was not marked as canceled")
 		assert.False(t, jt.Errored, "task was not marked as errored")
 		assert.Equal(t, "done", jt.Status, "task has status done")
 		assert.Nil(t, jt.Error, "task has no error set")
@@ -353,7 +353,7 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndS
 
 	jt := job.Tasks.ByName("on_error")
 	if assert.NotNil(t, jt) {
-		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.False(t, jt.Canceled, "on_error task was not marked as canceled")
 		assert.True(t, jt.Errored, "task was not marked as errored")
 		assert.Equal(t, "error", jt.Status, "task has status done")
 		assert.NotNil(t, jt.Error, "task has no error set")
@@ -412,7 +412,7 @@ func TestPipelineRunner_ScheduleAsync_WithFailingScript_TriggersOnErrorHook_AndS
 
 	jt := job.Tasks.ByName("on_error")
 	if assert.NotNil(t, jt) {
-		assert.False(t, jt.Canceled, "onError task was not marked as canceled")
+		assert.False(t, jt.Canceled, "on_error task was not marked as canceled")
 		assert.True(t, jt.Errored, "task was not marked as errored")
 		assert.Equal(t, "error", jt.Status, "task has status done")
 		assert.NotNil(t, jt.Error, "task has no error set")

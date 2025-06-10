@@ -72,7 +72,7 @@ type PipelineDef struct {
 	// Tasks is a map of task names to task definitions
 	Tasks map[string]TaskDef `yaml:"tasks"`
 
-	// Task to be executed if this pipeline fails, e.g. for notifications.
+	// Task to be added and executed if this pipeline fails, e.g. for notifications.
 	//
 	// In this task, you have the following variables set:
 	// - failedTaskName: Name of the failed task (key from pipelines.yml)
@@ -80,7 +80,7 @@ type PipelineDef struct {
 	// - failedTaskError: Error message of the failed task
 	// - failedTaskStdout: Stdout of the failed task
 	// - failedTaskStderr: Stderr of the failed task
-	OnError *OnErrorTaskDef `yaml:"onError"`
+	OnError *OnErrorTaskDef `yaml:"on_error"`
 
 	// SourcePath stores the source path where the pipeline was defined
 	SourcePath string
