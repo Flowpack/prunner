@@ -2,7 +2,7 @@ package taskctl_test
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"testing"
 	"time"
 
@@ -12,7 +12,7 @@ import (
 )
 
 func TestPgidExecutor_Execute(t *testing.T) {
-	e, err := taskctl.NewPgidExecutor(nil, ioutil.Discard, ioutil.Discard, 2*time.Second)
+	e, err := taskctl.NewPgidExecutor(nil, io.Discard, io.Discard, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

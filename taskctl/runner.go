@@ -178,7 +178,7 @@ func (r *TaskRunner) Run(t *task.Task) error {
 				return err
 			}
 			defer func() {
-				stdoutStorer.Close()
+				_ = stdoutStorer.Close() //nolint:errcheck
 			}()
 			stdoutWriter = append(stdoutWriter, stdoutStorer)
 		}
@@ -189,7 +189,7 @@ func (r *TaskRunner) Run(t *task.Task) error {
 				return err
 			}
 			defer func() {
-				stderrStorer.Close()
+				_ = stderrStorer.Close() //nolint:errcheck
 			}()
 			stderrWriter = append(stderrWriter, stderrStorer)
 		}

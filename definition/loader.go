@@ -1,10 +1,11 @@
 package definition
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"sort"
 
-	"github.com/friendsofgo/errors"
 	"github.com/mattn/go-zglob"
 	"gopkg.in/yaml.v2"
 )
@@ -12,7 +13,7 @@ import (
 func LoadRecursively(pattern string) (*PipelinesDef, error) {
 	matches, err := zglob.GlobFollowSymlinks(pattern)
 	if err != nil {
-		return nil, errors.Wrap(err, "finding files with glob")
+		return nil, fmt.Errorf("finding files with glob: %w", err)
 	}
 
 	// Make globbing deterministic
@@ -25,36 +26,38 @@ func LoadRecursively(pattern string) (*PipelinesDef, error) {
 	for _, path := range matches {
 		err = pipelinesDef.Load(path)
 		if err != nil {
-			return nil, errors.Wrapf(err, "loading %s", path)
+			return nil, fmt.Errorf("loading %s: %w", path, err)
 		}
 	}
 
 	return pipelinesDef, nil
 }
 
-func (d *PipelinesDef) Load(path string) error {
+func (d *PipelinesDef) Load(path string) (err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return errors.Wrap(err, "opening file")
+		return fmt.Errorf("opening file: %w", err)
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err = errors.Join(err, f.Close())
+	}(f)
 
 	var localDef PipelinesDef
 
 	err = yaml.NewDecoder(f).Decode(&localDef)
 	if err != nil {
-		return errors.Wrap(err, "decoding YAML")
+		return fmt.Errorf("decoding YAML: %w", err)
 	}
 	localDef.setDefaults()
 
 	for pipelineName, pipelineDef := range localDef.Pipelines {
 		if p, exists := d.Pipelines[pipelineName]; exists {
-			return errors.Errorf("pipeline %q was already declared in %s", pipelineName, p.SourcePath)
+			return fmt.Errorf("pipeline %q was already declared in %s", pipelineName, p.SourcePath)
 		}
 
-		err := pipelineDef.validate()
+		err = pipelineDef.validate()
 		if err != nil {
-			return errors.Wrapf(err, "invalid pipeline definition %q", pipelineName)
+			return fmt.Errorf("invalid pipeline definition %q: %w", pipelineName, err)
 		}
 
 		pipelineDef.SourcePath = path

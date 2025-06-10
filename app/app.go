@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"github.com/apex/log"
 	logfmt_handler "github.com/apex/log/handlers/logfmt"
 	text_handler "github.com/apex/log/handlers/text"
-	"github.com/friendsofgo/errors"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/joho/godotenv"
@@ -143,14 +143,14 @@ func loadDotenv(c *cli.Context) error {
 		for _, envFile := range envFiles {
 			err := loadEnvFile(envFile)
 			if err != nil {
-				return errors.Wrapf(err, "loading env file %s", envFile)
+				return fmt.Errorf("loading env file %s: %w", envFile, err)
 			}
 		}
 	}
 	return nil
 }
 
-func loadEnvFile(file string) error {
+func loadEnvFile(file string) (err error) {
 	f, err := os.Open(file)
 	if os.IsNotExist(err) {
 		// Ignore not existing dotenv files
@@ -158,7 +158,9 @@ func loadEnvFile(file string) error {
 	} else if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err = errors.Join(err, f.Close())
+	}(f)
 
 	log.
 		Debugf("Loading env from %q", file)
@@ -186,7 +188,7 @@ func appAction(c *cli.Context) error {
 
 	defs, err := definition.LoadRecursively(filepath.Join(c.String("path"), c.String("pattern")))
 	if err != nil {
-		return errors.Wrap(err, "loading definitions")
+		return fmt.Errorf("loading definitions: %w", err)
 	}
 
 	log.
@@ -197,12 +199,12 @@ func appAction(c *cli.Context) error {
 
 	outputStore, err := taskctl.NewOutputStore(path.Join(c.String("data"), "logs"))
 	if err != nil {
-		return errors.Wrap(err, "building output store")
+		return fmt.Errorf("building output store: %w", err)
 	}
 
 	dataStore, err := store.NewJSONDataStore(path.Join(c.String("data")))
 	if err != nil {
-		return errors.Wrap(err, "building pipeline runner store")
+		return fmt.Errorf("building pipeline runner store: %w", err)
 	}
 
 	// How signals are handled:
