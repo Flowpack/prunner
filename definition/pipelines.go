@@ -198,7 +198,7 @@ func (d *PipelinesDef) Validate() error {
 	return nil
 }
 
-func (d PipelinesDef) Equals(otherDefs PipelinesDef) bool {
+func (d *PipelinesDef) Equals(otherDefs PipelinesDef) bool {
 	if len(d.Pipelines) != len(otherDefs.Pipelines) {
 		return false
 	}

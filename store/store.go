@@ -1,11 +1,12 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path"
 	"time"
 
-	"github.com/friendsofgo/errors"
 	"github.com/gofrs/uuid"
 	jsoniter "github.com/json-iterator/go"
 )
@@ -64,7 +65,7 @@ func NewJSONDataStore(path string) (*JsonDataStore, error) {
 	// Make sure directory for store file exists
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating directory")
+		return nil, fmt.Errorf("creating directory: %w", err)
 	}
 
 	return &JsonDataStore{
@@ -72,44 +73,47 @@ func NewJSONDataStore(path string) (*JsonDataStore, error) {
 	}, nil
 }
 
-func (j *JsonDataStore) Load() (*PersistedData, error) {
+func (j *JsonDataStore) Load() (result *PersistedData, err error) {
 	f, err := os.Open(path.Join(j.path, "data.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return &PersistedData{}, nil
 	} else if err != nil {
-		return nil, errors.Wrap(err, "opening file")
+		return nil, fmt.Errorf("opening file: %w", err)
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err = errors.Join(err, f.Close())
+	}(f)
 
-	var result PersistedData
-
-	err = json.NewDecoder(f).Decode(&result)
+	result = new(PersistedData)
+	err = json.NewDecoder(f).Decode(result)
 	if err != nil {
-		return nil, errors.Wrap(err, "decoding JSON")
+		return nil, fmt.Errorf("decoding JSON: %w", err)
 	}
 
-	return &result, nil
+	return result, nil
 }
 
-func (j *JsonDataStore) Save(data *PersistedData) error {
+func (j *JsonDataStore) Save(data *PersistedData) (err error) {
 	// Use a temporary file for writing data to be crash resistant
 	f, err := os.CreateTemp(j.path, "data.*.tmp")
 	if err != nil {
-		return errors.Wrap(err, "creating temporary file")
+		return fmt.Errorf("creating temporary file: %w", err)
 	}
 	tmpFilename := f.Name()
 
 	err = json.NewEncoder(f).Encode(data)
 	// In any case close the file
-	f.Close()
+	defer func(f *os.File) {
+		err = errors.Join(err, f.Close())
+	}(f)
 	if err != nil {
-		return errors.Wrap(err, "encoding JSON")
+		return fmt.Errorf("encoding JSON: %w", err)
 	}
 
 	// Rename the tmp file to the data file to have something more atomic than writing directly to the data file
 	err = os.Rename(tmpFilename, path.Join(j.path, "data.json"))
 	if err != nil {
-		return errors.Wrap(err, "replacing data file by rename")
+		return fmt.Errorf("replacing data file by rename: %w", err)
 	}
 
 	return nil
