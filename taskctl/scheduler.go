@@ -39,6 +39,7 @@ func (s *Scheduler) OnStageChange(f func(stage *scheduler.Stage)) {
 // Schedule starts execution of the given ExecutionGraph
 //
 // Modified to notify on stage changes
+// Method blocks until FULL EXECUTION is completed
 func (s *Scheduler) Schedule(g *scheduler.ExecutionGraph) error {
 	var wg sync.WaitGroup
 

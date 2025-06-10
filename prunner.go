@@ -3,6 +3,7 @@ package prunner
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -40,8 +41,9 @@ type PipelineRunner struct {
 	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see NewPipelineRunner)
 	// externally, call requestPersist()
 	persistRequests chan struct{}
+	persistLoopDone chan struct{}
 
-	// Mutex for reading or writing jobs and job state
+	// Mutex for reading or writing pipeline definitions (defs), jobs and job state
 	mx               sync.RWMutex
 	createTaskRunner func(j *PipelineJob) taskctl.Runner
 
@@ -49,6 +51,8 @@ type PipelineRunner struct {
 	wg sync.WaitGroup
 	// Flag if the runner is shutting down
 	isShuttingDown bool
+	// shutdownCancel is the cancel function for the shutdown context (will stop persist loop)
+	shutdownCancel context.CancelFunc
 
 	// Poll interval for completed jobs for graceful shutdown
 	ShutdownPollInterval time.Duration
@@ -56,6 +60,8 @@ type PipelineRunner struct {
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
 func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func(j *PipelineJob) taskctl.Runner, store store.DataStore, outputStore taskctl.OutputStore) (*PipelineRunner, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
 	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -68,6 +74,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		outputStore:        outputStore,
 		// Use channel buffered with one extra slot, so we can keep save requests while a save is running without blocking
 		persistRequests:      make(chan struct{}, 1),
+		persistLoopDone:      make(chan struct{}),
+		shutdownCancel:       cancel,
 		createTaskRunner:     createTaskRunner,
 		ShutdownPollInterval: 3 * time.Second,
 	}
@@ -79,6 +87,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		}
 
 		go func() {
+			defer close(pRunner.persistLoopDone) // Signal that the persist loop is done on shutdown
+
 			for {
 				select {
 				case <-ctx.Done():
@@ -103,7 +113,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 // It can be scheduled (in the waitListByPipeline of PipelineRunner),
 // or currently running (jobsByID / jobsByPipeline in PipelineRunner).
 type PipelineJob struct {
-	ID         uuid.UUID
+	ID uuid.UUID
+	// Identifier of the pipeline (from the YAML file)
 	Pipeline   string
 	Env        map[string]string
 	Variables  map[string]interface{}
@@ -121,6 +132,8 @@ type PipelineJob struct {
 	// Tasks is an in-memory representation with state of tasks, sorted by dependencies
 	Tasks     jobTasks
 	LastError error
+	// firstFailedTask is a reference to the first task that failed in this job
+	firstFailedTask *jobTask
 
 	sched      *taskctl.Scheduler
 	taskRunner runner.Runner
@@ -194,6 +207,10 @@ var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
+// ScheduleAsync schedules a pipeline execution, if pipeline concurrency config allows for it.
+// "pipeline" is the pipeline ID from the YAML file.
+//
+// the returned PipelineJob is the individual execution context.
 func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*PipelineJob, error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
@@ -395,14 +412,142 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 
 	// Run graph asynchronously
 	r.wg.Add(1)
-	go func() {
+	go func(sched *taskctl.Scheduler) {
 		defer r.wg.Done()
-		lastErr := job.sched.Schedule(graph)
-		r.JobCompleted(job.ID, lastErr)
-	}()
+		lastErr := sched.Schedule(graph)
+		if lastErr != nil {
+			r.RunJobErrorHandler(job)
+		}
+		r.JobCompleted(job, lastErr)
+	}(job.sched)
+}
+func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
+	r.mx.Lock()
+	errorGraph, err := r.buildErrorGraph(job)
+	r.mx.Unlock()
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Error("Failed to build error pipeline graph")
+		// At this point, an error with the error handling happened - duh...
+		// Nothing we can do at this point.
+		return
+	}
+
+	// if errorGraph is nil (and no error); no error handling configured for task.
+	if errorGraph == nil {
+		return
+	}
+
+	// re-init scheduler, as we need a new one to schedule the error on. (the old one is already shut down
+	// if ContinueRunningTasksAfterFailure == false)
+	r.mx.Lock()
+	r.initScheduler(job)
+	r.mx.Unlock()
+
+	err = job.sched.Schedule(errorGraph)
+
+	if err != nil {
+		log.
+			WithError(err).
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Error("Failed to run error handling for job")
+	} else {
+		log.
+			WithField("jobID", job.ID).
+			WithField("pipeline", job.Pipeline).
+			Info("error handling completed")
+	}
 }
 
-// HandleTaskChange will be called when the task state changes in the task runner
+const OnErrorTaskName = "on_error"
+
+func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
+	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
+	if !pipelineDefExists {
+		return nil, fmt.Errorf("pipeline definition not found for pipeline %s (should never happen)", job.Pipeline)
+	}
+	onErrorTaskDef := pipelineDef.OnError
+	if onErrorTaskDef == nil {
+		// no error, but no error handling configured
+		return nil, nil
+	}
+
+	failedTask := job.firstFailedTask
+
+	failedTaskStdout := r.readTaskOutputBestEffort(job, failedTask, "stdout")
+	failedTaskStderr := r.readTaskOutputBestEffort(job, failedTask, "stderr")
+
+	onErrorVariables := make(map[string]interface{})
+	for key, value := range job.Variables {
+		onErrorVariables[key] = value
+	}
+
+	if failedTask != nil {
+		onErrorVariables["failedTaskName"] = failedTask.Name
+		onErrorVariables["failedTaskExitCode"] = failedTask.ExitCode
+		onErrorVariables["failedTaskError"] = failedTask.Error
+		onErrorVariables["failedTaskStdout"] = string(failedTaskStdout)
+		onErrorVariables["failedTaskStderr"] = string(failedTaskStderr)
+	}
+
+	onErrorJobTask := jobTask{
+		TaskDef: definition.TaskDef{
+			Script: onErrorTaskDef.Script,
+			// AllowFailure needs to be false, otherwise lastError below won't be filled (so errors will not appear in the log)
+			AllowFailure: false,
+			Env:          onErrorTaskDef.Env,
+		},
+		Name:   OnErrorTaskName,
+		Status: toStatus(scheduler.StatusWaiting),
+	}
+	job.Tasks = append(job.Tasks, onErrorJobTask)
+
+	return buildPipelineGraph(job.ID, jobTasks{onErrorJobTask}, onErrorVariables)
+}
+
+func (r *PipelineRunner) readTaskOutputBestEffort(job *PipelineJob, task *jobTask, outputName string) []byte {
+	if task == nil || job == nil {
+		return []byte(nil)
+	}
+
+	rc, err := r.outputStore.Reader(job.ID.String(), task.Name, outputName)
+	if err != nil {
+		log.
+			WithField("component", "runner").
+			WithField("jobID", job.ID.String()).
+			WithField("pipeline", job.Pipeline).
+			WithField("failedTaskName", task.Name).
+			WithField("outputName", outputName).
+			WithError(err).
+			Debug("Could not create stderrReader for failed task")
+		return []byte(nil)
+	} else {
+		defer func(rc io.ReadCloser) {
+			_ = rc.Close()
+		}(rc)
+		outputAsBytes, err := io.ReadAll(rc)
+		if err != nil {
+			log.
+				WithField("component", "runner").
+				WithField("jobID", job.ID.String()).
+				WithField("pipeline", job.Pipeline).
+				WithField("failedTaskName", task.Name).
+				WithField("outputName", outputName).
+				WithError(err).
+				Debug("Could not read output of task")
+		}
+
+		return outputAsBytes
+	}
+
+}
+
+// HandleTaskChange will be called when the task state changes in the task runner (taskctl)
+// it is short-lived and updates our JobTask state accordingly.
 func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
@@ -437,11 +582,15 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 		jt.Error = t.Error
 	}
 
-	// if the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is set to FALSE),
+	// If the task has errored, and we want to fail-fast (ContinueRunningTasksAfterFailure is false),
 	// then we directly abort all other tasks of the job.
 	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
 	// if one task failed, and we want to kill the other tasks.
 	if jt.Errored {
+		if j.firstFailedTask == nil {
+			// Remember the first failed task for later use in the error handling
+			j.firstFailedTask = jt
+		}
 		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
 		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
 			log.
@@ -484,14 +633,9 @@ func (r *PipelineRunner) HandleStageChange(stage *scheduler.Stage) {
 	r.requestPersist()
 }
 
-func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
+func (r *PipelineRunner) JobCompleted(job *PipelineJob, err error) {
 	r.mx.Lock()
 	defer r.mx.Unlock()
-
-	job := r.jobsByID[id]
-	if job == nil {
-		return
-	}
 
 	job.deinitScheduler()
 
@@ -508,7 +652,7 @@ func (r *PipelineRunner) JobCompleted(id uuid.UUID, err error) {
 	pipeline := job.Pipeline
 	log.
 		WithField("component", "runner").
-		WithField("jobID", id).
+		WithField("jobID", job.ID).
 		WithField("pipeline", pipeline).
 		Debug("Job completed")
 
@@ -710,9 +854,6 @@ func (r *PipelineRunner) initialLoadFromStore() error {
 }
 
 func (r *PipelineRunner) SaveToStore() {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	log.
 		WithField("component", "runner").
 		Debugf("Saving job state to data store")
@@ -807,8 +948,12 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		log.
 			WithField("component", "runner").
 			Debugf("Shutting down, waiting for pending operations...")
+
 		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
+
+		// Wait until the persist loop is done
+		<-r.persistLoopDone
 
 		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
@@ -816,6 +961,8 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 
 	r.mx.Lock()
 	r.isShuttingDown = true
+	r.shutdownCancel()
+
 	// Cancel all jobs on wait list
 	for pipelineName, jobs := range r.waitListByPipeline {
 		for _, job := range jobs {

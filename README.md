@@ -281,6 +281,43 @@ pipelines:
     tasks: # as usual
 ```
 
+### Error handling with on_error
+
+When a pipeline fails due to a task error, you can optionally configure an `on_error` task that will be executed
+to handle the failure. This is useful for sending notifications, cleanup operations, or logging failure details.
+
+```yaml
+pipelines:
+  deployment:
+    tasks:
+      build:
+        script:
+          - npm run build
+      deploy:
+        script:
+          - ./deploy.sh
+        depends_on:
+          - build
+    on_error:
+      script:
+        - echo "Deployment failed! Notifying team..."
+        - curl -d "Deployment of {{.failedTaskName}} failed" ntfy.sh/mytopic
+```
+
+The on_error task has access to special variables containing information about the failed task:
+
+* `failedTaskName`: Name of the task that failed (key from `pipelines`)
+* `failedTaskExitCode`: Exit code of the failed task
+* `failedTaskError`: Error message of the failed task
+* `failedTaskStdout`: Standard output of the failed task
+* `failedTaskStderr`: Standard error output of the failed task
+
+#### Important notes:
+
+* The `on_error` task only runs when a "normal" task in the pipeline fails
+* If the `on_error` task itself fails, the error will be logged but won't trigger another error handler
+* The `on_error` task has access to all the same job variables as regular tasks
+* Environment variables can be configured for the `on_error` task just like regular tasks
 
 ### Configuring retention period
 

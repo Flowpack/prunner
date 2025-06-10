@@ -60,6 +60,9 @@ pipelines:
       no-work:
         script:
           - go for a walk
+    on_error:
+      script:
+        - echo "Something went wrong, let's handle the error from {{.failedTaskName}}"
 
   queue_it:
     concurrency: 2

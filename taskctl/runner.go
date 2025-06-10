@@ -166,8 +166,8 @@ func (r *TaskRunner) Run(t *task.Task) error {
 		// but this lead to a huge memory leak because the full job output was retained
 		// in memory forever.
 		// This enabled features of taskctl like {{ .Tasks.TASKNAME.Output }} and {{.Output}},
-		// but we never promised these features. Thus it is fine to not log to stdout and stderr
-		// into a Buffer, but directly to a file.
+		// but we never promised these features. Thus, it is fine to not log stdout and stderr
+		// into a Buffer, but directly to the output store.
 		stdoutWriter []io.Writer
 		stderrWriter []io.Writer
 	)
