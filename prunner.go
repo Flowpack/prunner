@@ -41,6 +41,7 @@ type PipelineRunner struct {
 	// persistRequests is for triggering saving-the-store, which is then handled asynchronously, at most every 3 seconds (see NewPipelineRunner)
 	// externally, call requestPersist()
 	persistRequests chan struct{}
+	persistLoopDone chan struct{}
 
 	// Mutex for reading or writing pipeline definitions (defs), jobs and job state
 	mx               sync.RWMutex
@@ -50,6 +51,8 @@ type PipelineRunner struct {
 	wg sync.WaitGroup
 	// Flag if the runner is shutting down
 	isShuttingDown bool
+	// shutdownCancel is the cancel function for the shutdown context (will stop persist loop)
+	shutdownCancel context.CancelFunc
 
 	// Poll interval for completed jobs for graceful shutdown
 	ShutdownPollInterval time.Duration
@@ -57,6 +60,8 @@ type PipelineRunner struct {
 
 // NewPipelineRunner creates the central data structure which controls the full runner state; so this knows what is currently running
 func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, createTaskRunner func(j *PipelineJob) taskctl.Runner, store store.DataStore, outputStore taskctl.OutputStore) (*PipelineRunner, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
 	pRunner := &PipelineRunner{
 		defs: defs,
 		// jobsByID contains ALL jobs, no matter whether they are on the waitlist or are scheduled or cancelled.
@@ -69,6 +74,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		outputStore:        outputStore,
 		// Use channel buffered with one extra slot, so we can keep save requests while a save is running without blocking
 		persistRequests:      make(chan struct{}, 1),
+		persistLoopDone:      make(chan struct{}),
+		shutdownCancel:       cancel,
 		createTaskRunner:     createTaskRunner,
 		ShutdownPollInterval: 3 * time.Second,
 	}
@@ -80,6 +87,8 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 		}
 
 		go func() {
+			defer close(pRunner.persistLoopDone) // Signal that the persist loop is done on shutdown
+
 			for {
 				select {
 				case <-ctx.Done():
@@ -123,6 +132,8 @@ type PipelineJob struct {
 	// Tasks is an in-memory representation with state of tasks, sorted by dependencies
 	Tasks     jobTasks
 	LastError error
+	// firstFailedTask is a reference to the first task that failed in this job
+	firstFailedTask *jobTask
 
 	sched      *taskctl.Scheduler
 	taskRunner runner.Runner
@@ -411,7 +422,7 @@ func (r *PipelineRunner) startJob(job *PipelineJob) {
 	}()
 }
 func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
-	errorGraph, err := r.buildErrorGraph(job)
+	errorGraph, err := r.BuildErrorGraph(job)
 	if err != nil {
 		log.
 			WithError(err).
@@ -450,9 +461,10 @@ func (r *PipelineRunner) RunJobErrorHandler(job *PipelineJob) {
 
 const OnErrorTaskName = "on_error"
 
-func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
+func (r *PipelineRunner) BuildErrorGraph(job *PipelineJob) (*scheduler.ExecutionGraph, error) {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
+
 	pipelineDef, pipelineDefExists := r.defs.Pipelines[job.Pipeline]
 	if !pipelineDefExists {
 		return nil, fmt.Errorf("pipeline definition not found for pipeline %s (should never happen)", job.Pipeline)
@@ -463,8 +475,7 @@ func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.Execution
 		return nil, nil
 	}
 
-	// we assume the 1st failed task (by end date) is the root cause, because this triggered a cascading abort then.
-	failedTask := findFirstFailedTaskByEndDate(job.Tasks)
+	failedTask := job.firstFailedTask
 
 	failedTaskStdout := r.readTaskOutputBestEffort(job, failedTask, "stdout")
 	failedTaskStderr := r.readTaskOutputBestEffort(job, failedTask, "stderr")
@@ -473,7 +484,6 @@ func (r *PipelineRunner) buildErrorGraph(job *PipelineJob) (*scheduler.Execution
 	for key, value := range job.Variables {
 		onErrorVariables[key] = value
 	}
-	// TODO: find first failed task (by End Date)
 
 	if failedTask != nil {
 		onErrorVariables["failedTaskName"] = failedTask.Name
@@ -606,10 +616,9 @@ func (r *PipelineRunner) HandleTaskChange(t *task.Task) {
 	// NOTE: this is NOT the context.Canceled case from above (if a job is explicitly aborted), but only
 	// if one task failed, and we want to kill the other tasks.
 	if jt.Errored {
-		if jt.End == nil {
-			// Remember ending time in case of error (we need this to identify the correct onError hook)
-			now := time.Now()
-			jt.End = &now
+		if j.firstFailedTask == nil {
+			// Remember the first failed task for later use in the error handling
+			j.firstFailedTask = jt
 		}
 		pipelineDef, found := r.defs.Pipelines[j.Pipeline]
 		if found && !pipelineDef.ContinueRunningTasksAfterFailure {
@@ -979,13 +988,16 @@ func (r *PipelineRunner) Shutdown(ctx context.Context) error {
 		// Wait for all running jobs to have called JobCompleted
 		r.wg.Wait()
 
-		// TODO This is not safe to do outside of the requestPersist loop, since we might have a save in progress. So we need to wait until the save loop is finished before calling SaveToStore.
+		// Wait until the persist loop is done
+		<-r.persistLoopDone
 		// Do a final save to include the state of recently completed jobs
 		r.SaveToStore()
 	}()
 
 	r.mx.Lock()
 	r.isShuttingDown = true
+	r.shutdownCancel()
+
 	// Cancel all jobs on wait list
 	for pipelineName, jobs := range r.waitListByPipeline {
 		for _, job := range jobs {
