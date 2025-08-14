@@ -202,11 +202,11 @@ const (
 	// scheduleActionReplace: replace the last job on the waitlist with this one
 	scheduleActionReplace
 
-	// scheduleActionNoQueue: error case, if queueing is not allowed (queue_limit=0) and a job is running
-	scheduleActionNoQueue
+	// scheduleActionErrNoQueue: error case, if queueing is not allowed (queue_limit=0) and a job is running
+	scheduleActionErrNoQueue
 
-	// scheduleActionQueueFull: error case, if queue_limit is reached (with append queue strategy)
-	scheduleActionQueueFull
+	// scheduleActionErrQueueFull: error case, if queue_limit is reached (with append queue strategy)
+	scheduleActionErrQueueFull
 )
 
 var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipeline")
@@ -235,9 +235,9 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 	action := r.resolveScheduleAction(pipeline, false)
 
 	switch action {
-	case scheduleActionNoQueue:
+	case scheduleActionErrNoQueue:
 		return nil, errNoQueue
-	case scheduleActionQueueFull:
+	case scheduleActionErrQueueFull:
 		return nil, errQueueFull
 	}
 
@@ -766,7 +766,7 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay
 	if runningJobsCount >= pipelineDef.Concurrency || (pipelineDef.StartDelay > 0 && !ignoreStartDelay) {
 		// Check if jobs should be queued if concurrency factor is exceeded
 		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
-			return scheduleActionNoQueue
+			return scheduleActionErrNoQueue
 		}
 
 		// Check if a queued job on the wait list should be replaced depending on queue strategy
@@ -777,7 +777,7 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay
 
 		// Error if there is a queue limit and the number of queued jobs exceeds the allowed queue limit
 		if pipelineDef.QueueLimit != nil && len(waitList) >= *pipelineDef.QueueLimit {
-			return scheduleActionQueueFull
+			return scheduleActionErrQueueFull
 		}
 
 		return scheduleActionQueue
