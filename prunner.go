@@ -792,7 +792,7 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay
 			return scheduleActionErrNoQueue
 		}
 
-		if len(waitList) > 0 {
+		if len(waitList) >= *pipelineDef.QueueLimit {
 			// queue full -> replace last element
 			return scheduleActionReplace
 		}
