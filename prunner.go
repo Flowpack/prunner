@@ -144,6 +144,33 @@ func (j *PipelineJob) isRunning() bool {
 	return j.Start != nil && !j.Completed && !j.Canceled
 }
 
+// canBeStarted is true if:
+// - job is delayed and the delay has passed
+// - job is not yet running and not canceled
+// - job is not delayed
+//
+// Only decides for itself, without outer knowledge (e.g. if the pipeline still has free spots or not)
+func (j *PipelineJob) canBeStarted() bool {
+	if j.StartDelay > 0 && j.startTimer != nil {
+		// delay still running, we can't start this job.
+		// (startTimer set to nil in StartDelayedJob(), after the timer has finished)
+		return false
+	}
+
+	if j.Start != nil {
+		// already started, we can't start this job.
+		return false
+	}
+
+	if j.Canceled {
+		// cancelled, we can't start this job.
+		return false
+	}
+
+	// job is not delayed; or job is delayed and the delay has passed
+	return true
+}
+
 func (r *PipelineRunner) initScheduler(j *PipelineJob) {
 	// For correct cancellation of tasks a single task runner and scheduler per job is used
 
@@ -232,7 +259,7 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 		return nil, errors.Errorf("pipeline %q is not defined", pipeline)
 	}
 
-	action := r.resolveScheduleAction(pipeline, false)
+	action := r.resolveScheduleAction(pipeline)
 
 	switch action {
 	case scheduleActionErrNoQueue:
@@ -672,29 +699,35 @@ func (r *PipelineRunner) JobCompleted(job *PipelineJob, err error) {
 }
 
 func (r *PipelineRunner) startJobsOnWaitList(pipeline string) {
+	// Pipeline currently full? (all executors are working) -> abort
+	pipelineDef := r.defs.Pipelines[pipeline]
+	runningJobsCount := r.runningJobsCount(pipeline)
+	freeSlots := pipelineDef.Concurrency - runningJobsCount
+	if freeSlots <= 0 {
+		// no room to start any jobs right now
+		return
+	}
+
 	// Check wait list if another job is queued
 	waitList := r.waitListByPipeline[pipeline]
 
-	// Schedule as many jobs as are schedulable (also process if the schedule action is start delay and check individual jobs if they can be started)
-	for len(waitList) > 0 && r.resolveDequeueJobAction(waitList[0]) == scheduleActionStart {
-		queuedJob := waitList[0]
-		// Queued job has a start delay timer set - wait for it to fire
-		if queuedJob.startTimer != nil {
-			// TODO We need to check if we rather need to skip only this job and continue to process other jobs on the queue
-			break
+	// Schedule as many jobs as are schedulable
+	newWaitList := make([]*PipelineJob, 0, len(waitList))
+	for _, job := range waitList {
+		if job.canBeStarted() && freeSlots > 0 {
+			freeSlots--
+			r.startJob(job)
+			log.
+				WithField("component", "runner").
+				WithField("pipeline", job.Pipeline).
+				WithField("jobID", job.ID).
+				Debugf("Dequeue: scheduled job execution")
+		} else {
+			newWaitList = append(newWaitList, job)
 		}
-
-		waitList = waitList[1:]
-
-		r.startJob(queuedJob)
-
-		log.
-			WithField("component", "runner").
-			WithField("pipeline", queuedJob.Pipeline).
-			WithField("jobID", queuedJob.ID).
-			Debugf("Dequeue: scheduled job execution")
 	}
-	r.waitListByPipeline[pipeline] = waitList
+
+	r.waitListByPipeline[pipeline] = newWaitList
 }
 
 // IterateJobs calls process for each job in a read lock.
@@ -757,13 +790,13 @@ func (r *PipelineRunner) runningJobsCount(pipeline string) int {
 	return running
 }
 
-func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay bool) scheduleAction {
+func (r *PipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
 	pipelineDef := r.defs.Pipelines[pipeline]
 
 	// If a start delay is set, we will always queue the job, otherwise we check if the number of running jobs
 	// exceed the maximum concurrency
 	runningJobsCount := r.runningJobsCount(pipeline)
-	if runningJobsCount < pipelineDef.Concurrency && (pipelineDef.StartDelay == 0 || ignoreStartDelay) {
+	if runningJobsCount < pipelineDef.Concurrency && pipelineDef.StartDelay == 0 {
 		// job can be started right now, because pipeline is not running at full capacity, and there is no start delay
 		// (no queue handling)
 		return scheduleActionStart
@@ -805,14 +838,8 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay
 	return scheduleActionErrQueueFull
 }
 
-func (r *PipelineRunner) resolveDequeueJobAction(job *PipelineJob) scheduleAction {
-	// Start the job if it had a start delay but the timer finished
-	ignoreStartDelay := job.StartDelay > 0 && job.startTimer == nil
-	return r.resolveScheduleAction(job.Pipeline, ignoreStartDelay)
-}
-
 func (r *PipelineRunner) isSchedulable(pipeline string) bool {
-	action := r.resolveScheduleAction(pipeline, false)
+	action := r.resolveScheduleAction(pipeline)
 	switch action {
 	case scheduleActionReplace:
 		fallthrough
