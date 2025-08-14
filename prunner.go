@@ -3,6 +3,7 @@ package prunner
 import (
 	"context"
 	"fmt"
+	"github.com/Flowpack/prunner/helper/slice_utils"
 	"io"
 	"sort"
 	"sync"
@@ -227,10 +228,10 @@ var ErrShuttingDown = errors.New("runner is shutting down")
 
 type QueueStrategyImpl interface {
 	// first step in prunner.ScheduleAsync => check if we have capacity for this job
-	canAcceptJob(def definition.PipelineDef, waitList []*PipelineJob) error
+	canAcceptJob(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error
 
 	// add the job to the waitlist, uses the queue_strategy to determine how
-	modifyWaitList(def definition.PipelineDef, waitList []*PipelineJob, job *PipelineJob) []*PipelineJob
+	modifyWaitList(pipelineDef definition.PipelineDef, waitList []*PipelineJob, job *PipelineJob) []*PipelineJob
 }
 
 type QueueStrategyAppendImpl struct {
@@ -248,10 +249,9 @@ func (q QueueStrategyAppendImpl) canAcceptJob(pipelineDef definition.PipelineDef
 	return nil
 }
 
-func (q QueueStrategyAppendImpl) modifyWaitList(def definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
+func (q QueueStrategyAppendImpl) modifyWaitList(pipelineDef definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
 	log.
 		WithField("component", "runner").
-		WithField("strategy", "append").
 		WithField("pipeline", job.Pipeline).
 		WithField("jobID", job.ID).
 		WithField("variables", job.Variables).
@@ -275,7 +275,6 @@ func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.Pipeline
 		// waitlist nicht voll -> append
 		log.
 			WithField("component", "runner").
-			WithField("strategy", "replace - waitlist not full -> no replace").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
 			WithField("variables", job.Variables).
@@ -298,7 +297,6 @@ func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.Pipeline
 
 		log.
 			WithField("component", "runner").
-			WithField("strategy", "replace - waitlist was full -> replaced last job<").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
 			WithField("variables", job.Variables).
@@ -306,6 +304,54 @@ func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.Pipeline
 
 		return waitList
 	}
+}
+
+type QueueStrategyPartitionedReplaceImpl struct {
+}
+
+func (q QueueStrategyPartitionedReplaceImpl) canAcceptJob(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
+	if pipelineDef.QueuePartitionLimit != nil && *pipelineDef.QueuePartitionLimit == 0 {
+		// queue limit == 0 -> error -> NOTE: might be moved to config validation
+		return errNoQueue
+	}
+	return nil
+}
+
+func (q QueueStrategyPartitionedReplaceImpl) modifyWaitList(pipelineDef definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
+	queuePartition := job.queuePartition
+	partitionedWaitList := slice_utils.Filter(previousWaitList, func(job *PipelineJob) bool {
+		return job.queuePartition == queuePartition
+	})
+
+	if len(partitionedWaitList) < *pipelineDef.QueuePartitionLimit {
+		// partitioned wait list not full -> append job
+		return append(previousWaitList, job)
+	}
+
+	// partitioned wait list full -> replace partitioned job
+	previousJob := partitionedWaitList[len(partitionedWaitList)-1]
+	previousJob.Canceled = true
+	if previousJob.startTimer != nil {
+		log.
+			WithField("previousJobID", previousJob.ID).
+			Debugf("Stopped start timer of previous job")
+		// Stop timer and unset reference for clean up
+		previousJob.startTimer.Stop()
+		previousJob.startTimer = nil
+	}
+
+	// remove the just cancelled job from the waitlist
+	waitList := slice_utils.Filter(previousWaitList, func(job *PipelineJob) bool {
+		return previousJob != job
+	})
+
+	log.
+		WithField("component", "runner").
+		WithField("pipeline", job.Pipeline).
+		WithField("jobID", job.ID).
+		WithField("variables", job.Variables).
+		Debugf("Queued: partitioned replaced job on wait list")
+	return append(waitList, job)
 }
 
 // ScheduleAsync schedules a pipeline execution, if pipeline concurrency config allows for it.
@@ -840,6 +886,8 @@ func getQueueStrategyImpl(queueStrategy definition.QueueStrategy) QueueStrategyI
 		return QueueStrategyAppendImpl{}
 	case definition.QueueStrategyReplace:
 		return QueueStrategyReplaceImpl{}
+	case definition.QueueStrategyPartitionedReplace:
+		return QueueStrategyPartitionedReplaceImpl{}
 	}
 
 	return nil
