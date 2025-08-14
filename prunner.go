@@ -763,27 +763,46 @@ func (r *PipelineRunner) resolveScheduleAction(pipeline string, ignoreStartDelay
 	// If a start delay is set, we will always queue the job, otherwise we check if the number of running jobs
 	// exceed the maximum concurrency
 	runningJobsCount := r.runningJobsCount(pipeline)
-	if runningJobsCount >= pipelineDef.Concurrency || (pipelineDef.StartDelay > 0 && !ignoreStartDelay) {
-		// Check if jobs should be queued if concurrency factor is exceeded
+	if runningJobsCount < pipelineDef.Concurrency && (pipelineDef.StartDelay == 0 || ignoreStartDelay) {
+		// job can be started right now, because pipeline is not running at full capacity, and there is no start delay
+		// (no queue handling)
+		return scheduleActionStart
+	}
+
+	// here, we start with waitlist logic.
+	waitList := r.waitListByPipeline[pipeline]
+
+	switch pipelineDef.QueueStrategy {
+	case definition.QueueStrategyAppend:
 		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
+			// queue limit == 0 -> error -> NOTE: might be moved to config validation
 			return scheduleActionErrNoQueue
 		}
-
-		// Check if a queued job on the wait list should be replaced depending on queue strategy
-		waitList := r.waitListByPipeline[pipeline]
-		if pipelineDef.QueueStrategy == definition.QueueStrategyReplace && len(waitList) > 0 {
-			return scheduleActionReplace
-		}
-
-		// Error if there is a queue limit and the number of queued jobs exceeds the allowed queue limit
 		if pipelineDef.QueueLimit != nil && len(waitList) >= *pipelineDef.QueueLimit {
+			// queue full
 			return scheduleActionErrQueueFull
 		}
 
+		// queue not full -> append to queue
+		return scheduleActionQueue
+
+	case definition.QueueStrategyReplace:
+		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
+			// queue limit == 0 -> error -> NOTE: might be moved to config validation
+			return scheduleActionErrNoQueue
+		}
+
+		if len(waitList) > 0 {
+			// queue full -> replace last element
+			return scheduleActionReplace
+		}
+
+		// queue not full -> append to queue
 		return scheduleActionQueue
 	}
 
-	return scheduleActionStart
+	// TODO: THIS CASE SHOULD NEVER HAPPEN !!!
+	return scheduleActionErrQueueFull
 }
 
 func (r *PipelineRunner) resolveDequeueJobAction(job *PipelineJob) scheduleAction {
