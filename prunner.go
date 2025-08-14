@@ -199,9 +199,6 @@ const (
 	// scheduleActionQueue enqueues the job to the pipeline's waitlist
 	scheduleActionQueue
 
-	// TODO: never used, remove
-	scheduleActionQueueDelay
-
 	// scheduleActionReplace: replace the last job on the waitlist with this one
 	scheduleActionReplace
 
@@ -803,8 +800,6 @@ func (r *PipelineRunner) isSchedulable(pipeline string) bool {
 	case scheduleActionQueue:
 		fallthrough
 	case scheduleActionStart:
-		return true
-	case scheduleActionQueueDelay:
 		return true
 	}
 	return false
