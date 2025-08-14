@@ -1,0 +1,11 @@
+pipelines:
+  test_it:
+    queue_strategy: partitioned_replace
+    # keep two tasks in the queue PER PARTITION.
+    queue_partition_limit: 2
+    concurrency: 1
+
+    tasks:
+      test:
+        script:
+          - echo "Foo"

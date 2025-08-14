@@ -1,0 +1,10 @@
+pipelines:
+  test_it:
+    queue_strategy: partitioned_replace
+    # MISSING: queue_partition_limit: 2
+    concurrency: 1
+
+    tasks:
+      test:
+        script:
+          - echo "Foo"

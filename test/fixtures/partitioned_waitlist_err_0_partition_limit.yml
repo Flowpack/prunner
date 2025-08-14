@@ -1,0 +1,10 @@
+pipelines:
+  test_it:
+    queue_strategy: partitioned_replace
+    queue_partition_limit: 0 # !!! ERROR
+    concurrency: 1
+
+    tasks:
+      test:
+        script:
+          - echo "Foo"
