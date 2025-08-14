@@ -219,25 +219,6 @@ type jobTask struct {
 
 type jobTasks []jobTask
 
-type scheduleAction int
-
-const (
-	// scheduleActionStart directly starts a job via PipelineRunner.startJob()
-	scheduleActionStart scheduleAction = iota
-
-	// scheduleActionQueue enqueues the job to the pipeline's waitlist
-	scheduleActionQueue
-
-	// scheduleActionReplace: replace the last job on the waitlist with this one
-	scheduleActionReplace
-
-	// scheduleActionErrNoQueue: error case, if queueing is not allowed (queue_limit=0) and a job is running
-	scheduleActionErrNoQueue
-
-	// scheduleActionErrQueueFull: error case, if queue_limit is reached (with append queue strategy)
-	scheduleActionErrQueueFull
-)
-
 var errNoQueue = errors.New("concurrency exceeded and queueing disabled for pipeline")
 var errQueueFull = errors.New("concurrency exceeded and queue limit reached for pipeline")
 var ErrJobNotFound = errors.New("job not found")
@@ -245,15 +226,17 @@ var errJobAlreadyCompleted = errors.New("job is already completed")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
 type QueueStrategyImpl interface {
-	kannEntgegengenommenWerden(def definition.PipelineDef, waitList []*PipelineJob) error
+	// first step in prunner.ScheduleAsync => check if we have capacity for this job
+	canAcceptJob(def definition.PipelineDef, waitList []*PipelineJob) error
 
+	// add the job to the waitlist, uses the queue_strategy to determine how
 	modifyWaitList(def definition.PipelineDef, waitList []*PipelineJob, job *PipelineJob) []*PipelineJob
 }
 
 type QueueStrategyAppendImpl struct {
 }
 
-func (q QueueStrategyAppendImpl) kannEntgegengenommenWerden(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
+func (q QueueStrategyAppendImpl) canAcceptJob(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
 	if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
 		// queue limit == 0 -> error -> NOTE: might be moved to config validation
 		return errNoQueue
@@ -268,6 +251,7 @@ func (q QueueStrategyAppendImpl) kannEntgegengenommenWerden(pipelineDef definiti
 func (q QueueStrategyAppendImpl) modifyWaitList(def definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
 	log.
 		WithField("component", "runner").
+		WithField("strategy", "append").
 		WithField("pipeline", job.Pipeline).
 		WithField("jobID", job.ID).
 		WithField("variables", job.Variables).
@@ -278,7 +262,7 @@ func (q QueueStrategyAppendImpl) modifyWaitList(def definition.PipelineDef, prev
 type QueueStrategyReplaceImpl struct {
 }
 
-func (q QueueStrategyReplaceImpl) kannEntgegengenommenWerden(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
+func (q QueueStrategyReplaceImpl) canAcceptJob(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
 	if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
 		// queue limit == 0 -> error -> NOTE: might be moved to config validation
 		return errNoQueue
@@ -287,10 +271,11 @@ func (q QueueStrategyReplaceImpl) kannEntgegengenommenWerden(pipelineDef definit
 }
 
 func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
-	if len(previousWaitList) <= *pipelineDef.QueueLimit {
+	if len(previousWaitList) < *pipelineDef.QueueLimit {
 		// waitlist nicht voll -> append
 		log.
 			WithField("component", "runner").
+			WithField("strategy", "replace - waitlist not full -> no replace").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
 			WithField("variables", job.Variables).
@@ -313,6 +298,7 @@ func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.Pipeline
 
 		log.
 			WithField("component", "runner").
+			WithField("strategy", "replace - waitlist was full -> replaced last job<").
 			WithField("pipeline", job.Pipeline).
 			WithField("jobID", job.ID).
 			WithField("variables", job.Variables).
@@ -340,7 +326,7 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 	}
 
 	queueStrategyImpl := getQueueStrategyImpl(pipelineDef.QueueStrategy)
-	err := queueStrategyImpl.kannEntgegengenommenWerden(pipelineDef, r.waitListByPipeline[pipeline])
+	err := queueStrategyImpl.canAcceptJob(pipelineDef, r.waitListByPipeline[pipeline])
 	if err != nil {
 		return nil, err
 	}
@@ -371,8 +357,6 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 		job.startTimer = time.AfterFunc(job.StartDelay, func() {
 			r.StartDelayedJob(id)
 		})
-
-		return job, nil
 	} else {
 		// no delayed job
 		runningJobsCount := r.runningJobsCount(pipeline)

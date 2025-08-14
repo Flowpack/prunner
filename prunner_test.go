@@ -914,7 +914,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		Pipelines: map[string]definition.PipelineDef{
 			"jobWithStartDelay": {
 				Concurrency:   1,
-				StartDelay:    50 * time.Millisecond,
+				StartDelay:    100 * time.Millisecond,
 				QueueLimit:    intPtr(1),
 				QueueStrategy: definition.QueueStrategyReplace,
 				Tasks: map[string]definition.TaskDef{
