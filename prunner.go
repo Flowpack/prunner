@@ -193,11 +193,22 @@ type jobTasks []jobTask
 type scheduleAction int
 
 const (
+	// scheduleActionStart directly starts a job via PipelineRunner.startJob()
 	scheduleActionStart scheduleAction = iota
+
+	// scheduleActionQueue enqueues the job to the pipeline's waitlist
 	scheduleActionQueue
+
+	// TODO: never used, remove
 	scheduleActionQueueDelay
+
+	// scheduleActionReplace: replace the last job on the waitlist with this one
 	scheduleActionReplace
+
+	// scheduleActionNoQueue: error case, if queueing is not allowed (queue_limit=0) and a job is running
 	scheduleActionNoQueue
+
+	// scheduleActionQueueFull: error case, if queue_limit is reached (with append queue strategy)
 	scheduleActionQueueFull
 )
 
@@ -365,6 +376,7 @@ func buildPipelineGraph(id uuid.UUID, tasks jobTasks, vars map[string]interface{
 	return g, nil
 }
 
+// ReadJob loads the job identified by id and calls process() on it synchronously. All protected by the global r.mx mutex.
 func (r *PipelineRunner) ReadJob(id uuid.UUID, process func(j *PipelineJob)) error {
 	r.mx.RLock()
 	defer r.mx.RUnlock()

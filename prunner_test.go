@@ -958,6 +958,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 	job2, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
 	require.NoError(t, err)
 
+	// original "job" should be canceled
 	test.WaitForCondition(t, func() bool {
 		var canceled bool
 		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
@@ -966,6 +967,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		return canceled
 	}, 1*time.Millisecond, "job is canceled")
 
+	// job2 is scheduled
 	job2ID := job2.ID
 	test.WaitForCondition(t, func() bool {
 		var started bool
@@ -975,6 +977,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		return !started
 	}, 1*time.Millisecond, "job2 is not started (queued)")
 
+	// job2 is started after ~50 ms (which the test does not check for ^^)
 	test.WaitForCondition(t, func() bool {
 		var started bool
 		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
