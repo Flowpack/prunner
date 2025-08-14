@@ -115,10 +115,13 @@ func NewPipelineRunner(ctx context.Context, defs *definition.PipelinesDef, creat
 type PipelineJob struct {
 	ID uuid.UUID
 	// Identifier of the pipeline (from the YAML file)
-	Pipeline   string
-	Env        map[string]string
-	Variables  map[string]interface{}
-	StartDelay time.Duration
+	Pipeline string
+	// Identifier of the queue partition, if any (from definition)
+	queuePartition string
+	Env            map[string]string
+	Variables      map[string]interface{}
+	User           string
+	StartDelay     time.Duration
 
 	Completed bool
 	Canceled  bool
@@ -127,8 +130,7 @@ type PipelineJob struct {
 	// Start is the actual start time of the job. Could be nil if not yet started.
 	Start *time.Time
 	// End is the actual end time of the job (can be nil if incomplete)
-	End  *time.Time
-	User string
+	End *time.Time
 	// Tasks is an in-memory representation with state of tasks, sorted by dependencies
 	Tasks     jobTasks
 	LastError error
@@ -242,6 +244,84 @@ var ErrJobNotFound = errors.New("job not found")
 var errJobAlreadyCompleted = errors.New("job is already completed")
 var ErrShuttingDown = errors.New("runner is shutting down")
 
+type QueueStrategyImpl interface {
+	kannEntgegengenommenWerden(def definition.PipelineDef, waitList []*PipelineJob) error
+
+	modifyWaitList(def definition.PipelineDef, waitList []*PipelineJob, job *PipelineJob) []*PipelineJob
+}
+
+type QueueStrategyAppendImpl struct {
+}
+
+func (q QueueStrategyAppendImpl) kannEntgegengenommenWerden(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
+	if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
+		// queue limit == 0 -> error -> NOTE: might be moved to config validation
+		return errNoQueue
+	}
+	if pipelineDef.QueueLimit != nil && len(waitList) >= *pipelineDef.QueueLimit {
+		// queue full
+		return errQueueFull
+	}
+	return nil
+}
+
+func (q QueueStrategyAppendImpl) modifyWaitList(def definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
+	log.
+		WithField("component", "runner").
+		WithField("pipeline", job.Pipeline).
+		WithField("jobID", job.ID).
+		WithField("variables", job.Variables).
+		Debugf("Queued: added job to wait list")
+	return append(previousWaitList, job)
+}
+
+type QueueStrategyReplaceImpl struct {
+}
+
+func (q QueueStrategyReplaceImpl) kannEntgegengenommenWerden(pipelineDef definition.PipelineDef, waitList []*PipelineJob) error {
+	if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
+		// queue limit == 0 -> error -> NOTE: might be moved to config validation
+		return errNoQueue
+	}
+	return nil
+}
+
+func (q QueueStrategyReplaceImpl) modifyWaitList(pipelineDef definition.PipelineDef, previousWaitList []*PipelineJob, job *PipelineJob) []*PipelineJob {
+	if len(previousWaitList) <= *pipelineDef.QueueLimit {
+		// waitlist nicht voll -> append
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			WithField("variables", job.Variables).
+			Debugf("Queued: added job to wait list")
+		return append(previousWaitList, job)
+	} else {
+		// waitlist voll -> replace
+		previousJob := previousWaitList[len(previousWaitList)-1]
+		previousJob.Canceled = true
+		if previousJob.startTimer != nil {
+			log.
+				WithField("previousJobID", previousJob.ID).
+				Debugf("Stopped start timer of previous job")
+			// Stop timer and unset reference for clean up
+			previousJob.startTimer.Stop()
+			previousJob.startTimer = nil
+		}
+		waitList := previousWaitList[:]
+		waitList[len(waitList)-1] = job
+
+		log.
+			WithField("component", "runner").
+			WithField("pipeline", job.Pipeline).
+			WithField("jobID", job.ID).
+			WithField("variables", job.Variables).
+			Debugf("Queued: replaced job on wait list")
+
+		return waitList
+	}
+}
+
 // ScheduleAsync schedules a pipeline execution, if pipeline concurrency config allows for it.
 // "pipeline" is the pipeline ID from the YAML file.
 //
@@ -259,13 +339,10 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 		return nil, errors.Errorf("pipeline %q is not defined", pipeline)
 	}
 
-	action := r.resolveScheduleAction(pipeline)
-
-	switch action {
-	case scheduleActionErrNoQueue:
-		return nil, errNoQueue
-	case scheduleActionErrQueueFull:
-		return nil, errQueueFull
+	queueStrategyImpl := getQueueStrategyImpl(pipelineDef.QueueStrategy)
+	err := queueStrategyImpl.kannEntgegengenommenWerden(pipelineDef, r.waitListByPipeline[pipeline])
+	if err != nil {
+		return nil, err
 	}
 
 	id, err := uuid.NewV4()
@@ -276,70 +353,46 @@ func (r *PipelineRunner) ScheduleAsync(pipeline string, opts ScheduleOpts) (*Pip
 	defer r.requestPersist()
 
 	job := &PipelineJob{
-		ID:         id,
-		Pipeline:   pipeline,
-		Created:    time.Now(),
-		Tasks:      buildJobTasks(pipelineDef.Tasks),
-		Env:        pipelineDef.Env,
-		Variables:  opts.Variables,
-		User:       opts.User,
-		StartDelay: pipelineDef.StartDelay,
+		ID:             id,
+		Pipeline:       pipeline,
+		Created:        time.Now(),
+		Tasks:          buildJobTasks(pipelineDef.Tasks),
+		Env:            pipelineDef.Env,
+		Variables:      opts.Variables,
+		User:           opts.User,
+		queuePartition: opts.QueuePartition,
+		StartDelay:     pipelineDef.StartDelay,
 	}
-
 	r.jobsByID[id] = job
 	r.jobsByPipeline[pipeline] = append(r.jobsByPipeline[pipeline], job)
 
-	if job.StartDelay > 0 {
+	if pipelineDef.StartDelay > 0 {
 		// A delayed job is a job on the wait list that is started by a function after a delay
 		job.startTimer = time.AfterFunc(job.StartDelay, func() {
 			r.StartDelayedJob(id)
 		})
-	}
-
-	switch action {
-	case scheduleActionQueue:
-		r.waitListByPipeline[pipeline] = append(r.waitListByPipeline[pipeline], job)
-
-		log.
-			WithField("component", "runner").
-			WithField("pipeline", job.Pipeline).
-			WithField("jobID", job.ID).
-			WithField("variables", job.Variables).
-			Debugf("Queued: added job to wait list")
 
 		return job, nil
-	case scheduleActionReplace:
-		waitList := r.waitListByPipeline[pipeline]
-		previousJob := waitList[len(waitList)-1]
-		previousJob.Canceled = true
-		if previousJob.startTimer != nil {
+	} else {
+		// no delayed job
+		runningJobsCount := r.runningJobsCount(pipeline)
+		if runningJobsCount < pipelineDef.Concurrency {
+			// free capacity -> start job right now and finish.
+			r.startJob(job)
+
 			log.
-				WithField("previousJobID", previousJob.ID).
-				Debugf("Stopped start timer of previous job")
-			// Stop timer and unset reference for clean up
-			previousJob.startTimer.Stop()
-			previousJob.startTimer = nil
+				WithField("component", "runner").
+				WithField("pipeline", job.Pipeline).
+				WithField("jobID", job.ID).
+				WithField("variables", job.Variables).
+				Debugf("Started: scheduled job execution")
+
+			return job, nil
 		}
-		waitList[len(waitList)-1] = job
-
-		log.
-			WithField("component", "runner").
-			WithField("pipeline", job.Pipeline).
-			WithField("jobID", job.ID).
-			WithField("variables", job.Variables).
-			Debugf("Queued: replaced job on wait list")
-
-		return job, nil
 	}
 
-	r.startJob(job)
-
-	log.
-		WithField("component", "runner").
-		WithField("pipeline", job.Pipeline).
-		WithField("jobID", job.ID).
-		WithField("variables", job.Variables).
-		Debugf("Started: scheduled job execution")
+	// modify the waitlist
+	r.waitListByPipeline[pipeline] = queueStrategyImpl.modifyWaitList(pipelineDef, r.waitListByPipeline[pipeline], job)
 
 	return job, nil
 }
@@ -790,56 +843,28 @@ func (r *PipelineRunner) runningJobsCount(pipeline string) int {
 	return running
 }
 
-func (r *PipelineRunner) resolveScheduleAction(pipeline string) scheduleAction {
-	pipelineDef := r.defs.Pipelines[pipeline]
+// waitlistModifierFn modifies the wait list, if the job cannot be executed right away.
+type waitlistModifierFn func(previousWaitlist []*PipelineJob, job *PipelineJob) []*PipelineJob
 
-	// If a start delay is set, we will always queue the job, otherwise we check if the number of running jobs
-	// exceed the maximum concurrency
-	runningJobsCount := r.runningJobsCount(pipeline)
-	if runningJobsCount < pipelineDef.Concurrency && pipelineDef.StartDelay == 0 {
-		// job can be started right now, because pipeline is not running at full capacity, and there is no start delay
-		// (no queue handling)
-		return scheduleActionStart
-	}
+func waitlistAppendToQueue(previousWaitlist []*PipelineJob, job *PipelineJob) []*PipelineJob {
+	return append(previousWaitlist, job)
+}
 
-	// here, we start with waitlist logic.
-	waitList := r.waitListByPipeline[pipeline]
-
-	switch pipelineDef.QueueStrategy {
+func getQueueStrategyImpl(queueStrategy definition.QueueStrategy) QueueStrategyImpl {
+	switch queueStrategy {
 	case definition.QueueStrategyAppend:
-		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
-			// queue limit == 0 -> error -> NOTE: might be moved to config validation
-			return scheduleActionErrNoQueue
-		}
-		if pipelineDef.QueueLimit != nil && len(waitList) >= *pipelineDef.QueueLimit {
-			// queue full
-			return scheduleActionErrQueueFull
-		}
-
-		// queue not full -> append to queue
-		return scheduleActionQueue
-
+		return QueueStrategyAppendImpl{}
 	case definition.QueueStrategyReplace:
-		if pipelineDef.QueueLimit != nil && *pipelineDef.QueueLimit == 0 {
-			// queue limit == 0 -> error -> NOTE: might be moved to config validation
-			return scheduleActionErrNoQueue
-		}
-
-		if len(waitList) >= *pipelineDef.QueueLimit {
-			// queue full -> replace last element
-			return scheduleActionReplace
-		}
-
-		// queue not full -> append to queue
-		return scheduleActionQueue
+		return QueueStrategyReplaceImpl{}
 	}
 
-	// TODO: THIS CASE SHOULD NEVER HAPPEN !!!
-	return scheduleActionErrQueueFull
+	return nil
 }
 
 func (r *PipelineRunner) isSchedulable(pipeline string) bool {
-	action := r.resolveScheduleAction(pipeline)
+	// TODO REPLACE ME!!!
+	return true
+	/*action := r.resolveScheduleAction(pipeline)
 	switch action {
 	case scheduleActionReplace:
 		fallthrough
@@ -848,12 +873,14 @@ func (r *PipelineRunner) isSchedulable(pipeline string) bool {
 	case scheduleActionStart:
 		return true
 	}
-	return false
+	return false*/
 }
 
 type ScheduleOpts struct {
 	Variables map[string]interface{}
 	User      string
+	// for queue_strategy=partitioned_replace, the queue partition to use
+	QueuePartition string
 }
 
 func (r *PipelineRunner) initialLoadFromStore() error {
