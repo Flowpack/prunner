@@ -90,6 +90,10 @@ type pipelinesScheduleRequest struct {
 		// Job variables
 		// example: {"tag_name": "v1.17.4", "databases": ["mysql", "postgresql"]}
 		Variables map[string]interface{} `json:"variables"`
+
+		// for queue_strategy=partitioned_replace, the queue partition to use for this job
+		// example: "tenant1"
+		QueuePartition string `json:"queuePartition"`
 	}
 }
 
@@ -135,7 +139,7 @@ func (s *server) pipelinesSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pJob, err := s.pRunner.ScheduleAsync(in.Body.Pipeline, prunner.ScheduleOpts{Variables: in.Body.Variables, User: user})
+	pJob, err := s.pRunner.ScheduleAsync(in.Body.Pipeline, prunner.ScheduleOpts{Variables: in.Body.Variables, QueuePartition: in.Body.QueuePartition, User: user})
 	if err != nil {
 		// TODO Send JSON error and include expected errors (see resolveScheduleAction)
 		if errors.Is(err, prunner.ErrShuttingDown) {
