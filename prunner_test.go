@@ -914,7 +914,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		Pipelines: map[string]definition.PipelineDef{
 			"jobWithStartDelay": {
 				Concurrency:   1,
-				StartDelay:    50 * time.Millisecond,
+				StartDelay:    100 * time.Millisecond,
 				QueueLimit:    intPtr(1),
 				QueueStrategy: definition.QueueStrategyReplace,
 				Tasks: map[string]definition.TaskDef{
@@ -958,6 +958,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 	job2, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
 	require.NoError(t, err)
 
+	// original "job" should be canceled
 	test.WaitForCondition(t, func() bool {
 		var canceled bool
 		_ = pRunner.ReadJob(jobID, func(j *PipelineJob) {
@@ -966,6 +967,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		return canceled
 	}, 1*time.Millisecond, "job is canceled")
 
+	// job2 is scheduled
 	job2ID := job2.ID
 	test.WaitForCondition(t, func() bool {
 		var started bool
@@ -975,6 +977,7 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		return !started
 	}, 1*time.Millisecond, "job2 is not started (queued)")
 
+	// job2 is started after ~50 ms (which the test does not check for ^^)
 	test.WaitForCondition(t, func() bool {
 		var started bool
 		_ = pRunner.ReadJob(job2ID, func(j *PipelineJob) {
@@ -991,6 +994,180 @@ func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillQueueSi
 		})
 		return !running
 	}, 1*time.Millisecond, "job2 is finished")
+}
+
+func TestPipelineRunner_ScheduleAsync_WithStartDelay2QueueAndReplaceWillReplaceLastJob(t *testing.T) {
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"jobWithStartDelay": {
+				Concurrency:   1,
+				StartDelay:    50 * time.Millisecond,
+				QueueLimit:    intPtr(2), // !!! IMPORTANT for this testcase
+				QueueStrategy: definition.QueueStrategyReplace,
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"echo Test"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+	require.NoError(t, defs.Validate())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(tsk *task.Task) error {
+				log.Debugf("Run task %s on job %s", tsk.Name, j.ID.String())
+				return nil
+			},
+		}
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	// job1 + job2 + job3 is appended
+	job1, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	job2, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	job3, err := pRunner.ScheduleAsync("jobWithStartDelay", ScheduleOpts{})
+	require.NoError(t, err)
+
+	// job2 should be canceled
+	test.WaitForCondition(t, func() bool {
+		var canceled bool
+		_ = pRunner.ReadJob(job2.ID, func(j *PipelineJob) {
+			canceled = j.Canceled
+		})
+		return canceled
+	}, 1*time.Millisecond, "job2 was not canceled")
+
+	// when job2 was canceled, job1 should still be not canceled, and job3 also should be in the queue.
+	_ = pRunner.ReadJob(job1.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+	})
+	_ = pRunner.ReadJob(job2.ID, func(j *PipelineJob) {
+		assert.True(t, j.Canceled)
+	})
+	_ = pRunner.ReadJob(job3.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+	})
+
+	// we wait for job1 to be finished
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		var running bool
+
+		_ = pRunner.ReadJob(job1.ID, func(j *PipelineJob) {
+			started = j.Start != nil
+			running = j.isRunning()
+		})
+		return started && !running
+	}, 1*time.Millisecond, "job1 did not finish")
+
+	test.WaitForCondition(t, func() bool {
+		var started bool
+		var running bool
+
+		_ = pRunner.ReadJob(job3.ID, func(j *PipelineJob) {
+			started = j.Start != nil
+			running = j.isRunning()
+		})
+		return started && !running
+	}, 1*time.Millisecond, "job3 did not finish")
+}
+
+func TestPipelineRunner_ScheduleAsync_PartitionedReplaceWorksAsExpected(t *testing.T) {
+	// QueuePartitionLimit = 2
+	// startDelay = 50ms
+	// --time--> (time flows from left to right)
+	// a(1) means: "add job 'a' to partition 1"
+	//
+	// The testcase does the following -> quickly sends N jobs to the queue:
+	// a(1)..b(2)..c(1)..d(2)..e(2)..f(1)
+	//                   ^^^ a,b,c,d still exist (no replacement yet)
+	//                        ^^^ d replaced by e, others not replaced.
+	//                              ^^^ c was replaced
+
+	var defs = &definition.PipelinesDef{
+		Pipelines: map[string]definition.PipelineDef{
+			"withReplacePartition": {
+				Concurrency:         1,
+				StartDelay:          50 * time.Millisecond,
+				QueuePartitionLimit: intPtr(2),                                  // !!! IMPORTANT for this testcase
+				QueueStrategy:       definition.QueueStrategyPartitionedReplace, // !!! IMPORTANT for this testcase
+				Tasks: map[string]definition.TaskDef{
+					"echo": {
+						Script: []string{"echo Test"},
+					},
+				},
+				SourcePath: "fixtures",
+			},
+		},
+	}
+	require.NoError(t, defs.Validate())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := test.NewMockStore()
+	pRunner, err := NewPipelineRunner(ctx, defs, func(j *PipelineJob) taskctl.Runner {
+		return &test.MockRunner{
+			OnRun: func(tsk *task.Task) error {
+				log.Debugf("Run task %s on job %s", tsk.Name, j.ID.String())
+				return nil
+			},
+		}
+	}, store, test.NewMockOutputStore())
+	require.NoError(t, err)
+
+	jobA, err := pRunner.ScheduleAsync("withReplacePartition", ScheduleOpts{QueuePartition: "1"})
+	require.NoError(t, err)
+	jobB, err := pRunner.ScheduleAsync("withReplacePartition", ScheduleOpts{QueuePartition: "2"})
+	require.NoError(t, err)
+	jobC, err := pRunner.ScheduleAsync("withReplacePartition", ScheduleOpts{QueuePartition: "1"})
+	require.NoError(t, err)
+	jobD, err := pRunner.ScheduleAsync("withReplacePartition", ScheduleOpts{QueuePartition: "2"})
+	require.NoError(t, err)
+
+	// jobs A-D not yet started, not canceled.
+	_ = pRunner.ReadJob(jobA.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+		assert.Nil(t, j.Start)
+	})
+	_ = pRunner.ReadJob(jobB.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+		assert.Nil(t, j.Start)
+	})
+	_ = pRunner.ReadJob(jobC.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+		assert.Nil(t, j.Start)
+	})
+	_ = pRunner.ReadJob(jobD.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+		assert.Nil(t, j.Start)
+	})
+
+	// push E(2) (replaces D(2))
+	jobE, err := pRunner.ScheduleAsync("withReplacePartition", ScheduleOpts{QueuePartition: "2"})
+	require.NoError(t, err)
+	_ = pRunner.ReadJob(jobD.ID, func(j *PipelineJob) {
+		assert.True(t, j.Canceled) // !! this changed now
+		assert.Nil(t, j.Start)
+	})
+	_ = pRunner.ReadJob(jobE.ID, func(j *PipelineJob) {
+		assert.False(t, j.Canceled)
+		assert.Nil(t, j.Start)
+	})
+
+	// push F(1) (replaces C(1))
+	// check that A,B,E,F were executed.
 }
 
 func TestPipelineRunner_ScheduleAsync_WithStartDelayNoQueueAndReplaceWillNotRunConcurrently(t *testing.T) {

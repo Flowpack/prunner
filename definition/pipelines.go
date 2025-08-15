@@ -52,10 +52,15 @@ type OnErrorTaskDef struct {
 type PipelineDef struct {
 	// Concurrency declares how many instances of this pipeline are allowed to execute concurrently (defaults to 1)
 	Concurrency int `yaml:"concurrency"`
-	// QueueLimit is the number of slots for queueing jobs if the allowed concurrency is exceeded, defaults to unbounded (nil)
+	// QueueLimit is the number of slots for queueing jobs if the allowed concurrency is exceeded, defaults to unbounded (nil). Only allowed with queue_strategy=append|replace, not with partitioned_replace (there, use queue_partition_limit instead)
 	QueueLimit *int `yaml:"queue_limit"`
+
+	// QueuePartitionLimit is the number of slots for queueing jobs per partition, if queue_strategy=partitioned_replace is used.
+	QueuePartitionLimit *int `yaml:"queue_partition_limit"`
+
 	// QueueStrategy to use when adding jobs to the queue (defaults to append)
 	QueueStrategy QueueStrategy `yaml:"queue_strategy"`
+
 	// StartDelay will delay the start of a job if the value is greater than zero (defaults to 0)
 	StartDelay time.Duration `yaml:"start_delay"`
 
@@ -98,6 +103,19 @@ func (d PipelineDef) validate() error {
 	}
 	if d.StartDelay > 0 && d.QueueLimit != nil && *d.QueueLimit == 0 {
 		return errors.New("start_delay needs queue_limit > 0")
+	}
+
+	if d.QueueStrategy == QueueStrategyPartitionedReplace {
+		if d.QueueLimit != nil {
+			return errors.New("queue_limit is not allowed if queue_strategy=partitioned_replace, use queue_partition_limit instead")
+		}
+		if d.QueuePartitionLimit == nil || *d.QueuePartitionLimit < 1 {
+			return errors.New("queue_partition_limit must be defined and >=1 if queue_strategy=partitioned_replace")
+		}
+	} else {
+		if d.QueuePartitionLimit != nil {
+			return errors.New("queue_partition_limit is not allowed if queue_strategy=append|replace, use queue_limit instead")
+		}
 	}
 
 	for taskName, taskDef := range d.Tasks {
@@ -164,13 +182,21 @@ func (d PipelineDef) Equals(otherDef PipelineDef) bool {
 	return true
 }
 
+// QueueStrategy defines the behavior when jobs wait (=are queued) before pipeline execution.
 type QueueStrategy int
 
 const (
-	// QueueStrategyAppend appends jobs to the queue until queue limit is reached
+	// QueueStrategyAppend appends jobs to the queue until the queue limit is reached (FIFO)
 	QueueStrategyAppend QueueStrategy = 0
-	// QueueStrategyReplace replaces pending jobs (with same variables) instead of appending to the queue
+
+	// QueueStrategyReplace replaces the **LAST** pending job if the queue limit is reached. If the queue is not yet full, the job is appended.
+	// NOTE: if using queue_limit=1 + replace, this can lead to starvation if rapidly enqueuing jobs. If using queue_limit >= 2, this cannot happen anymore.
+	// (see 2025_08_14_partitioned_waitlist.md for detailed description)
 	QueueStrategyReplace QueueStrategy = 1
+
+	// QueueStrategyPartitionedReplace implements the "partitioned waitlist" strategy, as explained in 2025_08_14_partitioned_waitlist.md.
+	// -> it replaces the **LAST** pending job of a given partition, if the partition is full (=queue_partition_limit).
+	QueueStrategyPartitionedReplace QueueStrategy = 2
 )
 
 func (s *QueueStrategy) UnmarshalYAML(unmarshal func(interface{}) error) error {
@@ -185,6 +211,8 @@ func (s *QueueStrategy) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		*s = QueueStrategyAppend
 	case "replace":
 		*s = QueueStrategyReplace
+	case "partitioned_replace":
+		*s = QueueStrategyPartitionedReplace
 	default:
 		return errors.Errorf("unknown queue strategy: %q", strategyName)
 	}
