@@ -19,7 +19,7 @@ This is NOT a fully featured CI pipeline solution.
 <!-- TOC -->
   * [Badges](#badges)
   * [Components](#components)
-    * [prunner (this repository)](#prunner--this-repository-)
+    * [prunner (this repository)](#prunner-this-repository)
     * [prunner-ui](#prunner-ui)
     * [Flowpack.Prunner](#flowpackprunner)
   * [User guide](#user-guide)
@@ -32,7 +32,10 @@ This is NOT a fully featured CI pipeline solution.
     * [Limiting concurrency](#limiting-concurrency)
     * [The wait list](#the-wait-list)
     * [Debounce jobs with a start delay](#debounce-jobs-with-a-start-delay)
+    * [Partitioned Wait Lists](#partitioned-wait-lists)
     * [Disabling fail-fast behavior](#disabling-fail-fast-behavior)
+    * [Error handling with on_error](#error-handling-with-on_error)
+      * [Important notes:](#important-notes)
     * [Configuring retention period](#configuring-retention-period)
     * [Handling of child processes](#handling-of-child-processes)
     * [Graceful shutdown](#graceful-shutdown)
@@ -44,11 +47,11 @@ This is NOT a fully featured CI pipeline solution.
   * [Development](#development)
     * [Requirements](#requirements)
     * [Running locally](#running-locally)
-    * [IDE Setup (IntelliJ/GoLand)](#ide-setup--intellijgoland-)
+    * [IDE Setup (IntelliJ/GoLand)](#ide-setup-intellijgoland)
     * [Building for different operating systems.](#building-for-different-operating-systems)
     * [Running Tests](#running-tests)
     * [Memory Leak Debugging](#memory-leak-debugging)
-    * [Generate OpenAPI (Swagger) spec](#generate-openapi--swagger--spec)
+    * [Generate OpenAPI (Swagger) spec](#generate-openapi-swagger-spec)
     * [Releasing](#releasing)
   * [Security concept](#security-concept)
   * [License](#license)
@@ -222,7 +225,8 @@ pipelines:
 
 To deactivate the queuing altogether, set `queue_limit: 0`.
 
-Now, if the queue is limited, an error occurs when it is full and you try to add a new job.
+Now, if the queue is limited (and default `queue_strategy: append` is configured),
+an error occurs when it is full and you try to add a new job.
 
 Alternatively, you can also set `queue_strategy: replace` to replace the last job in the
 queue by the newly added one:
@@ -257,12 +261,59 @@ in form of a zero or positive decimal value with a time unit ("ms", "s", "m", "h
 ```yaml
 pipelines:
   do_something:
+    # NOTE: to prevent starvation, use queue_limit >= 2x
     queue_limit: 1
     queue_strategy: replace
     concurrency: 1
     # Queues a run of the job and only starts it after 10 seconds have passed (if no other run was triggered which replaced the queued job)
     start_delay: 10s
     tasks: # as usual
+```
+
+NOTE: If you use `queue_limit: 1` and `start_delay`, you will run into **starvation** (=the job never starts)
+if jobs are submitted quicker than `start_delay`. If you instead use `queue_limit: 2` or higher, you can
+avoid this issue: Then, the 1st slot will always be worked on after `start_delay`, while the 2nd slot will
+be replaced quickly.
+
+### Partitioned Wait Lists
+
+If you have a multi-tenant application, you might want to use **one wait-list per tenant** (e.g. for import jobs),
+combined with global `concurrency` limits (depending on the globally available server resources).
+
+To enable this, do the following:
+
+- `queue_strategy: partitioned_replace`: Enabled partitioned wait list
+- `queue_partition_limit: 1` (or higher): Configure the number of wait-list slots per tenant. The last slot gets replaced
+  when the wait-list is full.
+- can be combined with arbitrary `start_delay` and `concurrency` as expected
+
+Full example:
+
+```
+pipelines:
+  do_something:
+    queue_strategy: partitioned_replace
+    # prevent starvation
+    queue_partition_limit: 2
+    concurrency: 1
+    # Queues a run of the job and only starts it after 10 seconds have passed (if no other run was triggered which replaced the queued job)
+    start_delay: 10s
+    tasks: # as usual
+
+```
+
+Additionally, when submitting a job, you need to specify the `queuePartition` argument:
+
+```
+POST /pipelines/schedule
+
+{
+  "pipeline": "my_pipeline",
+  "variables": {
+    ...
+  },
+  "queuePartition": "tenant_foo"
+}
 ```
 
 
