@@ -3,11 +3,12 @@ package prunner
 import (
 	"context"
 	"fmt"
-	"github.com/Flowpack/prunner/helper/slice_utils"
 	"io"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/Flowpack/prunner/helper/slice_utils"
 
 	"github.com/Flowpack/prunner/store"
 
@@ -873,13 +874,6 @@ func (r *PipelineRunner) runningJobsCount(pipeline string) int {
 	return running
 }
 
-// waitlistModifierFn modifies the wait list, if the job cannot be executed right away.
-type waitlistModifierFn func(previousWaitlist []*PipelineJob, job *PipelineJob) []*PipelineJob
-
-func waitlistAppendToQueue(previousWaitlist []*PipelineJob, job *PipelineJob) []*PipelineJob {
-	return append(previousWaitlist, job)
-}
-
 func getQueueStrategyImpl(queueStrategy definition.QueueStrategy) QueueStrategyImpl {
 	switch queueStrategy {
 	case definition.QueueStrategyAppend:
@@ -894,18 +888,14 @@ func getQueueStrategyImpl(queueStrategy definition.QueueStrategy) QueueStrategyI
 }
 
 func (r *PipelineRunner) isSchedulable(pipeline string) bool {
-	// TODO REPLACE ME!!!
-	return true
-	/*action := r.resolveScheduleAction(pipeline)
-	switch action {
-	case scheduleActionReplace:
-		fallthrough
-	case scheduleActionQueue:
-		fallthrough
-	case scheduleActionStart:
-		return true
+	pipelineDef, ok := r.defs.Pipelines[pipeline]
+	if !ok {
+		return false
 	}
-	return false*/
+
+	queueStrategyImpl := getQueueStrategyImpl(pipelineDef.QueueStrategy)
+	err := queueStrategyImpl.canAcceptJob(pipelineDef, r.waitListByPipeline[pipeline])
+	return err == nil
 }
 
 type ScheduleOpts struct {
